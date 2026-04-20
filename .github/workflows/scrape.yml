@@ -1,0 +1,68 @@
+name: Scrape Twitter feeds
+
+on:
+  schedule:
+    # every 15 minutes (GitHub may delay 10-30 min during peak)
+    - cron: '*/15 * * * *'
+  workflow_dispatch:        # manual trigger
+  push:
+    branches: [main]
+    paths:
+      - 'scraper.py'
+      - 'users.txt'
+      - '.github/workflows/scrape.yml'
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run scraper
+        run: python3 scraper.py
+
+      - name: Build Pages site (index + feeds)
+        run: |
+          mkdir -p _site
+          cp -r feeds/* _site/ 2>/dev/null || true
+          {
+            echo '<!doctype html><meta charset=utf-8><title>Twitter RSS</title>'
+            echo '<h1>Twitter → RSS</h1><ul>'
+            for f in _site/*.xml; do
+              [ -e "$f" ] || continue
+              name=$(basename "$f" .xml)
+              echo "<li><a href=\"$(basename $f)\">@$name</a></li>"
+            done
+            echo '</ul>'
+          } > _site/index.html
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: scrape
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
