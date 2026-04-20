@@ -44,11 +44,14 @@ jobs:
           cp -r feeds/* _site/ 2>/dev/null || true
           {
             echo '<!doctype html><meta charset=utf-8><title>Twitter RSS</title>'
-            echo '<h1>Twitter → RSS</h1><ul>'
+            echo '<style>body{font-family:system-ui;max-width:720px;margin:2rem auto;padding:0 1rem}li{margin:.3rem 0}code{background:#f3f3f3;padding:.1em .4em;border-radius:3px}</style>'
+            echo '<h1>Twitter → RSS / JSON Feed</h1>'
+            echo '<p>Powered by xcancel.com. Auto-refresh every 15 min via GitHub Actions.</p>'
+            echo '<ul>'
             for f in _site/*.xml; do
               [ -e "$f" ] || continue
               name=$(basename "$f" .xml)
-              echo "<li><a href=\"$(basename $f)\">@$name</a></li>"
+              echo "<li><strong>@$name</strong> — <a href=\"$name.xml\">RSS</a> · <a href=\"$name.json\">JSON Feed</a></li>"
             done
             echo '</ul>'
           } > _site/index.html

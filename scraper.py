@@ -63,12 +63,23 @@ class Entry:
     author_handle: str             # without @
     author_name: str
     text: str                      # plain text
-    html: str                      # rendered HTML for <description>
+    html: str                      # rendered HTML for <content:encoded>
     published: datetime            # UTC
     is_retweet: bool = False
-    retweeter: Optional[str] = None  # profile user when is_retweet
+    retweeter: Optional[str] = None   # profile user when is_retweet
+    author_avatar: Optional[str] = None  # direct pbs.twimg avatar URL
     media: list[Media] = field(default_factory=list)
     quoted: Optional["Entry"] = None
+    categories: list[str] = field(default_factory=list)  # hashtags + @mentions
+
+
+@dataclass
+class ProfileMeta:
+    handle: str
+    full_name: str
+    bio: str
+    avatar: str  # large avatar URL (pbs.twimg orig)
+    site_url: str  # x.com profile URL
 
 
 def _ua() -> str:
@@ -144,6 +155,45 @@ def _absolutize(base: str, u: str) -> str:
     return u
 
 
+def _hq_avatar(url: str) -> str:
+    """Upgrade profile image to a large variant (Twitter serves _400x400; _bigger = 73px)."""
+    if not url:
+        return url
+    # Normalize to 400x400 quality for RSS header
+    return re.sub(r"_(normal|bigger|mini|x96|400x400)\.(jpg|jpeg|png|webp)", r"_400x400.\2", url)
+
+
+def parse_profile_meta(html: str, profile_user: str) -> ProfileMeta:
+    soup = BeautifulSoup(html, "html.parser")
+    og = soup.find("meta", attrs={"property": "og:image"})
+    avatar = og["content"] if og and og.get("content") else ""
+    fullname_el = soup.select_one("a.profile-card-fullname")
+    full_name = fullname_el.get_text(strip=True) if fullname_el else profile_user
+    bio_el = soup.select_one("div.profile-bio")
+    bio = bio_el.get_text(" ", strip=True) if bio_el else ""
+    return ProfileMeta(
+        handle=profile_user,
+        full_name=full_name,
+        bio=bio or f"@{profile_user} on X",
+        avatar=_hq_avatar(avatar),
+        site_url=f"https://x.com/{profile_user}",
+    )
+
+
+def _extract_categories(text: str) -> list[str]:
+    tags = re.findall(r"#(\w{1,50})", text)
+    mentions = re.findall(r"@(\w{1,15})", text)
+    out: list[str] = []
+    seen = set()
+    for t in tags + mentions:
+        k = t.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(t)
+    return out[:10]
+
+
 def parse_xcancel_html(html: str, profile_user: str) -> list[Entry]:
     soup = BeautifulSoup(html, "html.parser")
     entries: list[Entry] = []
@@ -161,6 +211,8 @@ def parse_xcancel_html(html: str, profile_user: str) -> list[Entry]:
         is_rt = item.select_one("div.retweet-header") is not None
         fullname_el = item.select_one("a.fullname")
         author_name = fullname_el.get_text(strip=True) if fullname_el else author_handle
+        avatar_img = item.select_one("a.tweet-avatar img")
+        author_avatar = _hq_avatar(avatar_img["src"]) if avatar_img and avatar_img.get("src") else None
 
         date_el = item.select_one("span.tweet-date a")
         pub = _parse_date(date_el.get("title", "")) if date_el else None
@@ -240,8 +292,10 @@ def parse_xcancel_html(html: str, profile_user: str) -> list[Entry]:
             published=pub,
             is_retweet=is_rt,
             retweeter=profile_user if is_rt else None,
+            author_avatar=author_avatar,
             media=media,
             quoted=quoted,
+            categories=_extract_categories(text + " " + (quoted.text if quoted else "")),
         )
         e.html = render_html(e)
         entries.append(e)
@@ -252,7 +306,15 @@ def render_html(e: Entry) -> str:
     parts: list[str] = []
     if e.is_retweet:
         parts.append(f'<p><em>🔁 @{e.retweeter} retweeted</em></p>')
-    parts.append(f'<p><strong>{escape(e.author_name)}</strong> (<a href="https://x.com/{e.author_handle}">@{e.author_handle}</a>)</p>')
+    # author row with avatar
+    avatar_img = ""
+    if e.author_avatar:
+        avatar_img = (f'<img src="{escape(e.author_avatar)}" alt="" width="32" height="32" '
+                      f'style="border-radius:50%;vertical-align:middle;margin-right:6px"/>')
+    parts.append(
+        f'<p>{avatar_img}<strong>{escape(e.author_name)}</strong> '
+        f'(<a href="https://x.com/{e.author_handle}">@{e.author_handle}</a>)</p>'
+    )
     if e.text:
         # convert \n to <br>
         safe = escape(e.text).replace("\n", "<br>")
@@ -287,39 +349,114 @@ def render_html(e: Entry) -> str:
     return "\n".join(parts)
 
 
-def build_rss(user: str, entries: list[Entry]) -> bytes:
-    ns = {"media": "http://search.yahoo.com/mrss/", "atom": "http://www.w3.org/2005/Atom"}
-    ET.register_namespace("media", ns["media"])
-    ET.register_namespace("atom", ns["atom"])
+def _plain_summary(text: str, limit: int = 240) -> str:
+    s = text.strip().replace("\n", " ")
+    return s[: limit - 1] + "…" if len(s) > limit else s
+
+
+def build_rss(profile: ProfileMeta, entries: list[Entry]) -> bytes:
+    """Folo-flavored RSS 2.0: feed <image>, <content:encoded>, <dc:creator>, <category>, <ttl>."""
+    NS_CONTENT = "http://purl.org/rss/1.0/modules/content/"
+    NS_DC = "http://purl.org/dc/elements/1.1/"
+    NS_ATOM = "http://www.w3.org/2005/Atom"
+    ET.register_namespace("content", NS_CONTENT)
+    ET.register_namespace("dc", NS_DC)
+    ET.register_namespace("atom", NS_ATOM)
+
     rss = ET.Element("rss", attrib={"version": "2.0"})
     ch = ET.SubElement(rss, "channel")
-    ET.SubElement(ch, "title").text = f"@{user} on X (via xcancel)"
-    ET.SubElement(ch, "link").text = f"https://x.com/{user}"
-    ET.SubElement(ch, "description").text = f"Posts, retweets and quotes from @{user}"
+    title = f"{profile.full_name} (@{profile.handle}) on X"
+    ET.SubElement(ch, "title").text = title
+    ET.SubElement(ch, "link").text = profile.site_url
+    ET.SubElement(ch, "description").text = profile.bio
     ET.SubElement(ch, "language").text = "en"
+    ET.SubElement(ch, "ttl").text = "15"
     ET.SubElement(ch, "lastBuildDate").text = format_datetime(datetime.now(timezone.utc))
+    # feed-level avatar (Folo reads <image><url>)
+    if profile.avatar:
+        img_el = ET.SubElement(ch, "image")
+        ET.SubElement(img_el, "url").text = profile.avatar
+        ET.SubElement(img_el, "title").text = title
+        ET.SubElement(img_el, "link").text = profile.site_url
 
     for e in entries:
         it = ET.SubElement(ch, "item")
-        title = e.text.strip().replace("\n", " ")[:120] or f"Tweet {e.id}"
+        it_title = _plain_summary(e.text, 120) or f"Tweet {e.id}"
         if e.is_retweet:
-            title = f"🔁 RT @{e.author_handle}: {title}"
-        ET.SubElement(it, "title").text = title
+            it_title = f"🔁 RT @{e.author_handle}: {it_title}"
+        ET.SubElement(it, "title").text = it_title
         ET.SubElement(it, "link").text = e.url
         ET.SubElement(it, "guid", isPermaLink="true").text = e.url
         ET.SubElement(it, "pubDate").text = format_datetime(e.published)
-        ET.SubElement(it, "author").text = f"{e.author_handle}@x.com ({e.author_name})"
-        ET.SubElement(it, "description").text = e.html
-        for m in e.media:
-            attrs = {"url": m.url, "medium": "image" if m.kind == "image" else "video"}
-            if m.kind == "video":
-                attrs["type"] = "video/mp4"
-            ET.SubElement(it, f"{{{ns['media']}}}content", attrib=attrs)
-            if m.kind == "video" and m.poster:
-                ET.SubElement(it, f"{{{ns['media']}}}thumbnail", attrib={"url": m.poster})
-    # pretty print
+        # Folo reads <dc:creator>
+        ET.SubElement(it, f"{{{NS_DC}}}creator").text = f"{e.author_name} (@{e.author_handle})"
+        # Plain text summary for <description>, rich HTML for <content:encoded>
+        ET.SubElement(it, "description").text = _plain_summary(e.text, 280) or it_title
+        ET.SubElement(it, f"{{{NS_CONTENT}}}encoded").text = e.html
+        for cat in e.categories:
+            ET.SubElement(it, "category").text = cat
+        # First media as <enclosure> (Folo RSS parser only reads one enclosure)
+        if e.media:
+            m0 = e.media[0]
+            mime = "video/mp4" if m0.kind == "video" else "image/jpeg"
+            ET.SubElement(it, "enclosure", attrib={
+                "url": m0.url, "type": mime, "length": "0",
+            })
     ET.indent(rss, space="  ")
     return b'<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(rss, encoding="utf-8")
+
+
+def build_json_feed(profile: ProfileMeta, entries: list[Entry]) -> bytes:
+    """JSON Feed 1.1 — Folo reads per-item authors with avatar. Great for retweets."""
+    items = []
+    for e in entries:
+        authors = [{
+            "name": f"{e.author_name} (@{e.author_handle})",
+            "url": f"https://x.com/{e.author_handle}",
+        }]
+        if e.author_avatar:
+            authors[0]["avatar"] = e.author_avatar
+        item = {
+            "id": e.url,
+            "url": e.url,
+            "title": _plain_summary(e.text, 120) or f"Tweet {e.id}",
+            "content_html": e.html,
+            "summary": _plain_summary(e.text, 280),
+            "date_published": e.published.isoformat().replace("+00:00", "Z"),
+            "authors": authors,
+            "tags": e.categories or None,
+        }
+        if e.is_retweet:
+            item["title"] = f"🔁 RT @{e.author_handle}: {item['title']}"
+        # media (Folo JSON Feed reads top-level `image` as photo)
+        imgs = [m for m in e.media if m.kind == "image"]
+        if imgs:
+            item["image"] = imgs[0].url
+        attachments = []
+        for m in e.media:
+            attachments.append({
+                "url": m.url,
+                "mime_type": "video/mp4" if m.kind == "video" else "image/jpeg",
+            })
+        if attachments:
+            item["attachments"] = attachments
+        items.append({k: v for k, v in item.items() if v is not None})
+    feed = {
+        "version": "https://jsonfeed.org/version/1.1",
+        "title": f"{profile.full_name} (@{profile.handle}) on X",
+        "home_page_url": profile.site_url,
+        "feed_url": f"https://melroseee-e.github.io/twitter-rss/{profile.handle}.json",
+        "description": profile.bio,
+        "icon": profile.avatar,
+        "language": "en",
+        "authors": [{
+            "name": profile.full_name,
+            "url": profile.site_url,
+            "avatar": profile.avatar,
+        }],
+        "items": items,
+    }
+    return json.dumps(feed, ensure_ascii=False, indent=2).encode("utf-8")
 
 
 def load_state(user: str) -> dict:
@@ -335,7 +472,9 @@ def save_state(user: str, state: dict) -> None:
 
 def process_user(user: str, client: httpx.Client) -> bool:
     html = fetch_xcancel_html(user, client)
+    profile: Optional[ProfileMeta] = None
     if html:
+        profile = parse_profile_meta(html, user)
         entries = parse_xcancel_html(html, user)
     else:
         md = fetch_via_jina(user, client)
@@ -346,14 +485,21 @@ def process_user(user: str, client: httpx.Client) -> bool:
     if not entries:
         log.warning(f"{user}: 0 entries parsed")
         return False
+    if profile is None:
+        profile = ProfileMeta(
+            handle=user, full_name=f"@{user}", bio=f"@{user} on X",
+            avatar="", site_url=f"https://x.com/{user}",
+        )
 
-    # merge with previously seen entries? simplest: just overwrite with latest 50
-    # Folo dedupes by guid so we can emit fresh each time.
+    # Folo dedupes by guid; emit latest 50 fresh each run.
     entries.sort(key=lambda e: e.published, reverse=True)
-    xml = build_rss(user, entries[:50])
-    out = FEEDS_DIR / f"{user}.xml"
-    out.write_bytes(xml)
-    log.info(f"{user}: wrote {len(entries)} entries -> {out}")
+    latest = entries[:50]
+
+    xml = build_rss(profile, latest)
+    (FEEDS_DIR / f"{user}.xml").write_bytes(xml)
+    js = build_json_feed(profile, latest)
+    (FEEDS_DIR / f"{user}.json").write_bytes(js)
+    log.info(f"{user}: wrote {len(latest)} entries (xml + json)")
 
     st = load_state(user)
     ids = [e.id for e in entries]
