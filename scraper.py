@@ -86,15 +86,100 @@ def _ua() -> str:
     return random.choice(UAS)
 
 
+_ANUBIS_RE = re.compile(
+    r'<script id="anubis_challenge" type="application/json">(.+?)</script>', re.S
+)
+_ANUBIS_BASEPREFIX_RE = re.compile(
+    r'<script id="anubis_base_prefix" type="application/json">(.+?)</script>', re.S
+)
+
+
+def _solve_anubis(challenge: dict) -> tuple[str, int]:
+    """Find nonce s.t. SHA-256(randomData + nonce) has the required leading zero bits.
+
+    Spec (Anubis fast algo, v1.25): bytes-level check —
+      requiredZeroBytes = difficulty // 2 must all be 0; if difficulty is odd,
+      next byte's high nibble must be 0.
+    """
+    import hashlib
+    data: str = challenge["randomData"]
+    diff: int = int(challenge.get("difficulty") or challenge.get("rules", {}).get("difficulty") or 4)
+    req = diff // 2
+    odd = diff % 2 != 0
+    base = data.encode()
+    nonce = 0
+    while True:
+        h = hashlib.sha256(base + str(nonce).encode()).digest()
+        ok = all(h[i] == 0 for i in range(req)) and (not odd or h[req] >> 4 == 0)
+        if ok:
+            return h.hex(), nonce
+        nonce += 1
+
+
+def _anubis_pass(client: httpx.Client, base: str, html: str, original_url: str, ua: str) -> bool:
+    """Solve Anubis challenge and submit; on success the client cookies are set."""
+    m = _ANUBIS_RE.search(html)
+    if not m:
+        return False
+    try:
+        wrapper = json.loads(m.group(1))
+    except Exception:
+        return False
+    rules = wrapper.get("rules") or {}
+    challenge = wrapper.get("challenge") or {}
+    if "difficulty" not in challenge:
+        challenge["difficulty"] = rules.get("difficulty", 4)
+    bp_m = _ANUBIS_BASEPREFIX_RE.search(html)
+    base_prefix = ""
+    if bp_m:
+        try:
+            base_prefix = json.loads(bp_m.group(1)) or ""
+        except Exception:
+            pass
+
+    t0 = time.time()
+    try:
+        h, nonce = _solve_anubis(challenge)
+    except Exception as e:
+        log.warning(f"[anubis] solve failed: {e}")
+        return False
+    elapsed_ms = int((time.time() - t0) * 1000)
+    log.info(f"[anubis] solved diff={challenge['difficulty']} in {elapsed_ms}ms (nonce={nonce})")
+
+    pass_url = f"{base}{base_prefix}/.within.website/x/cmd/anubis/api/pass-challenge"
+    params = {
+        "id": challenge["id"],
+        "response": h,
+        "nonce": str(nonce),
+        "redir": original_url,
+        "elapsedTime": str(elapsed_ms),
+    }
+    try:
+        r = client.get(pass_url, params=params, headers={"User-Agent": ua, "Referer": original_url},
+                        timeout=20, follow_redirects=True)
+        return r.status_code in (200, 302) and "Verifying your request" not in r.text and "Making sure you" not in r.text
+    except Exception as e:
+        log.warning(f"[anubis] pass-challenge failed: {e}")
+        return False
+
+
 def fetch_xcancel_html(user: str, client: httpx.Client) -> Optional[str]:
     for base in XCANCEL_BASES:
         url = f"{base}/{user}"
+        ua = _ua()
         try:
-            r = client.get(url, headers={"User-Agent": _ua()}, timeout=25, follow_redirects=True)
-            if r.status_code == 200 and 'class="timeline-item' in r.text:
-                log.info(f"[xcancel] {user}: OK ({len(r.text)} bytes from {r.url})")
-                return r.text
-            log.warning(f"[xcancel] {user}: HTTP {r.status_code} from {url}")
+            r = client.get(url, headers={"User-Agent": ua}, timeout=25, follow_redirects=True)
+            text = r.text
+            # 1) Anubis challenge? solve and refetch
+            if ("anubis_challenge" in text) or ("Verifying your request" in text) or ("Making sure you" in text):
+                log.info(f"[xcancel] {user}: Anubis challenge from {base}, solving…")
+                if _anubis_pass(client, base, text, url, ua):
+                    r = client.get(url, headers={"User-Agent": ua}, timeout=25, follow_redirects=True)
+                    text = r.text
+            if r.status_code == 200 and 'class="timeline-item' in text:
+                log.info(f"[xcancel] {user}: OK ({len(text)} bytes from {r.url})")
+                return text
+            log.warning(f"[xcancel] {user}: HTTP {r.status_code} no timeline in {len(text)}b from {url}")
         except Exception as e:
             log.warning(f"[xcancel] {user}: {e}")
     return None
