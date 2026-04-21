@@ -439,14 +439,20 @@ def _plain_summary(text: str, limit: int = 240) -> str:
     return s[: limit - 1] + "…" if len(s) > limit else s
 
 
+PAGES_BASE = "https://melroseee-e.github.io/twitter-rss"
+
+
 def build_rss(profile: ProfileMeta, entries: list[Entry]) -> bytes:
-    """Folo-flavored RSS 2.0: feed <image>, <content:encoded>, <dc:creator>, <category>, <ttl>."""
+    """Folo-flavored RSS 2.0: feed <image>, <content:encoded>, <dc:creator>, <category>, <ttl>
+    plus atom:self + syndication module to hint aggressive polling."""
     NS_CONTENT = "http://purl.org/rss/1.0/modules/content/"
     NS_DC = "http://purl.org/dc/elements/1.1/"
     NS_ATOM = "http://www.w3.org/2005/Atom"
+    NS_SY = "http://purl.org/rss/1.0/modules/syndication/"
     ET.register_namespace("content", NS_CONTENT)
     ET.register_namespace("dc", NS_DC)
     ET.register_namespace("atom", NS_ATOM)
+    ET.register_namespace("sy", NS_SY)
 
     rss = ET.Element("rss", attrib={"version": "2.0"})
     ch = ET.SubElement(rss, "channel")
@@ -454,9 +460,19 @@ def build_rss(profile: ProfileMeta, entries: list[Entry]) -> bytes:
     ET.SubElement(ch, "title").text = title
     ET.SubElement(ch, "link").text = profile.site_url
     ET.SubElement(ch, "description").text = profile.bio
+    # atom:self — tells aggregators the canonical feed URL (best-practice for RSS 2.0)
+    ET.SubElement(ch, f"{{{NS_ATOM}}}link", attrib={
+        "href": f"{PAGES_BASE}/{profile.handle}.xml",
+        "rel": "self",
+        "type": "application/rss+xml",
+    })
     ET.SubElement(ch, "language").text = "en"
     ET.SubElement(ch, "ttl").text = "15"
+    # syndication module — honored by more aggregators than <ttl>
+    ET.SubElement(ch, f"{{{NS_SY}}}updatePeriod").text = "hourly"
+    ET.SubElement(ch, f"{{{NS_SY}}}updateFrequency").text = "4"  # 4 per hour = every 15 min
     ET.SubElement(ch, "lastBuildDate").text = format_datetime(datetime.now(timezone.utc))
+    ET.SubElement(ch, "pubDate").text = format_datetime(datetime.now(timezone.utc))
     # feed-level avatar (Folo reads <image><url>)
     if profile.avatar:
         img_el = ET.SubElement(ch, "image")
