@@ -231,17 +231,32 @@ def _clean_xcancel_url(u: str) -> str:
     """Strip xcancel proxy prefixes; return direct pbs.twimg / video.twimg URL when possible."""
     if not u:
         return u
-    # Nitter-style "/pic/orig/..." or "/video/.../video.twimg.com/..."
+    import urllib.parse
+    # Strip any Nitter proxy host prefix first so we handle both absolute and path-only forms.
+    # e.g. "http://nitter.tiekoetter.com/pic/pbs.twimg.com%2Fprofile_images%2F..." → "/pic/..."
+    nitter_host = re.match(r"^https?://[^/]*(?:xcancel|nitter|tiekoetter)[^/]*(/.*)$", u)
+    if nitter_host:
+        u = nitter_host.group(1)
+    # Already a real twimg / pbs URL → keep as-is
+    if u.startswith("http") and ("twimg.com" in u or "pbs.twimg" in u):
+        return u
+    # Nitter proxy formats:
+    #   /pic/<encoded>                    → pbs.twimg.com
+    #   /pic/orig/<encoded>               → original quality
+    #   /video/<sig>/video.twimg.com/...  → video.twimg.com
     for prefix in ("/pic/orig/", "/pic/"):
         if u.startswith(prefix):
-            rest = u[len(prefix):]
-            # URL-decoded twimg path
-            import urllib.parse
-            return "https://" + urllib.parse.unquote(rest)
+            rest = urllib.parse.unquote(u[len(prefix):])
+            if rest.startswith("http"):
+                return rest
+            if rest.startswith(("pbs.twimg.com/", "video.twimg.com/", "abs.twimg.com/")):
+                return "https://" + rest
+            # path-only like "media/..." / "profile_images/..." / "ext_tw_video_thumb/..."
+            return "https://pbs.twimg.com/" + rest
     m = re.search(r"/video/[^/]+/(video\.twimg\.com/.+)$", u)
     if m:
         return "https://" + m.group(1)
-    # already absolute
+    # Other absolute URLs (rare): keep
     if u.startswith("http"):
         return u
     return u
@@ -275,7 +290,7 @@ def parse_profile_meta(html: str, profile_user: str) -> ProfileMeta:
         handle=profile_user,
         full_name=full_name,
         bio=bio or f"@{profile_user} on X",
-        avatar=_hq_avatar(avatar),
+        avatar=_hq_avatar(_clean_xcancel_url(avatar)),
         site_url=f"https://x.com/{profile_user}",
     )
 
@@ -312,7 +327,10 @@ def parse_xcancel_html(html: str, profile_user: str) -> list[Entry]:
         fullname_el = item.select_one("a.fullname")
         author_name = fullname_el.get_text(strip=True) if fullname_el else author_handle
         avatar_img = item.select_one("a.tweet-avatar img")
-        author_avatar = _hq_avatar(avatar_img["src"]) if avatar_img and avatar_img.get("src") else None
+        author_avatar = (
+            _hq_avatar(_clean_xcancel_url(avatar_img["src"]))
+            if avatar_img and avatar_img.get("src") else None
+        )
 
         date_el = item.select_one("span.tweet-date a")
         pub = _parse_date(date_el.get("title", "")) if date_el else None
@@ -343,8 +361,9 @@ def parse_xcancel_html(html: str, profile_user: str) -> list[Entry]:
             src_el = vid.select_one("source")
             if src_el and src_el.get("src"):
                 vurl = _clean_xcancel_url(src_el["src"])
-                media.append(Media("video", vurl, poster=poster))
-            elif poster:
+                if "twimg.com" in vurl:
+                    media.append(Media("video", vurl, poster=poster if "twimg.com" in poster else None))
+            elif poster and "twimg.com" in poster:
                 # gif fallback
                 media.append(Media("image", poster))
 
@@ -369,8 +388,8 @@ def parse_xcancel_html(html: str, profile_user: str) -> list[Entry]:
                     poster = _clean_xcancel_url(vid.get("poster") or "")
                     src_el = vid.select_one("source")
                     vurl = _clean_xcancel_url(src_el["src"]) if src_el and src_el.get("src") else ""
-                    if vurl:
-                        qmedia.append(Media("video", vurl, poster=poster))
+                    if vurl and "twimg.com" in vurl:
+                        qmedia.append(Media("video", vurl, poster=poster if "twimg.com" in poster else None))
                 quoted = Entry(
                     id=qm.group(2),
                     url=f"https://x.com/{qm.group(1)}/status/{qm.group(2)}",
