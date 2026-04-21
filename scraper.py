@@ -38,6 +38,10 @@ XCANCEL_BASES = [
     "https://xcancel.com",
     "https://nitter.tiekoetter.com",
 ]
+# Two timeline variants per instance give us cache-key diversity:
+# /<user>           → main profile (own tweets + retweets)
+# /<user>/with_replies → same + replies; cached separately by Nitter.
+XCANCEL_PATHS = ["/{user}", "/{user}/with_replies"]
 JINA_PREFIX = "https://r.jina.ai/"
 
 UAS = [
@@ -163,26 +167,37 @@ def _anubis_pass(client: httpx.Client, base: str, html: str, original_url: str, 
         return False
 
 
-def fetch_xcancel_html(user: str, client: httpx.Client) -> Optional[str]:
+def fetch_timeline_htmls(user: str, client: httpx.Client) -> list[tuple[str, str]]:
+    """Fetch timeline HTML from every (base × path) combo with cache-bust.
+
+    Returns list of (label, html). Nitter instances cache per URL including query string,
+    so `?_=<unix_ts>` forces a fresh upstream pull. Merging results across instances +
+    /with_replies variant is the main defense against a single source's stale cache.
+    """
+    cb = int(time.time())
+    out: list[tuple[str, str]] = []
     for base in XCANCEL_BASES:
-        url = f"{base}/{user}"
-        ua = _ua()
-        try:
-            r = client.get(url, headers={"User-Agent": ua}, timeout=25, follow_redirects=True)
-            text = r.text
-            # 1) Anubis challenge? solve and refetch
-            if ("anubis_challenge" in text) or ("Verifying your request" in text) or ("Making sure you" in text):
-                log.info(f"[xcancel] {user}: Anubis challenge from {base}, solving…")
-                if _anubis_pass(client, base, text, url, ua):
-                    r = client.get(url, headers={"User-Agent": ua}, timeout=25, follow_redirects=True)
-                    text = r.text
-            if r.status_code == 200 and 'class="timeline-item' in text:
-                log.info(f"[xcancel] {user}: OK ({len(text)} bytes from {r.url})")
-                return text
-            log.warning(f"[xcancel] {user}: HTTP {r.status_code} no timeline in {len(text)}b from {url}")
-        except Exception as e:
-            log.warning(f"[xcancel] {user}: {e}")
-    return None
+        for path_tmpl in XCANCEL_PATHS:
+            path = path_tmpl.format(user=user)
+            url = f"{base}{path}?_={cb}"
+            label = f"{base.split('//', 1)[1]}{path}"
+            ua = _ua()
+            try:
+                r = client.get(url, headers={"User-Agent": ua}, timeout=25, follow_redirects=True)
+                text = r.text
+                if ("anubis_challenge" in text) or ("Verifying your request" in text) or ("Making sure you" in text):
+                    log.info(f"[timeline] {label}: Anubis, solving…")
+                    if _anubis_pass(client, base, text, url, ua):
+                        r = client.get(url, headers={"User-Agent": ua}, timeout=25, follow_redirects=True)
+                        text = r.text
+                if r.status_code == 200 and 'class="timeline-item' in text:
+                    log.info(f"[timeline] {label}: OK ({len(text)}b)")
+                    out.append((label, text))
+                else:
+                    log.warning(f"[timeline] {label}: HTTP {r.status_code} no timeline ({len(text)}b)")
+            except Exception as e:
+                log.warning(f"[timeline] {label}: {e}")
+    return out
 
 
 def fetch_via_jina(user: str, client: httpx.Client) -> Optional[str]:
@@ -572,11 +587,28 @@ def save_state(user: str, state: dict) -> None:
 
 
 def process_user(user: str, client: httpx.Client) -> bool:
-    html = fetch_xcancel_html(user, client)
+    htmls = fetch_timeline_htmls(user, client)
     profile: Optional[ProfileMeta] = None
-    if html:
-        profile = parse_profile_meta(html, user)
-        entries = parse_xcancel_html(html, user)
+    entries: list[Entry] = []
+    if htmls:
+        # Use the main profile page (not /with_replies) for profile metadata
+        profile_html = next((h for lbl, h in htmls if "/with_replies" not in lbl), htmls[0][1])
+        profile = parse_profile_meta(profile_html, user)
+        # Merge entries across all fetched pages; dedupe by tweet id,
+        # keep the first occurrence (earliest source wins, but content is identical).
+        by_id: dict[str, Entry] = {}
+        per_source: list[int] = []
+        for lbl, h in htmls:
+            n_before = len(by_id)
+            for e in parse_xcancel_html(h, user):
+                if e.id not in by_id:
+                    by_id[e.id] = e
+            per_source.append(len(by_id) - n_before)
+        entries = list(by_id.values())
+        log.info(
+            f"{user}: merged {len(entries)} unique entries from {len(htmls)} sources "
+            f"(per-source new: {per_source})"
+        )
     else:
         md = fetch_via_jina(user, client)
         if not md:
