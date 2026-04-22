@@ -663,9 +663,10 @@ def save_state(user: str, state: dict) -> None:
     (STATE_DIR / f"{user}.json").write_text(json.dumps(state, indent=2))
 
 
-# How many historical items to keep per feed. Large enough that re-subscribing
-# in any reader gets a deep backlog (like OpenAI News does with 900+).
-MAX_ITEMS_PER_FEED = 500
+# How many historical items to keep per feed. twscraper backfill can yield
+# 2000+ for older users (karpathy goes back to 2017). Bump high so incremental
+# scraper runs don't truncate the deep history exported from tweets.db.
+MAX_ITEMS_PER_FEED = 5000
 
 
 def _existing_xml_items(user: str) -> list:
