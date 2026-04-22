@@ -39,15 +39,26 @@ jobs:
         # Brings the previously-deployed feed xml/json files into the runner
         # so scraper.py and accumulate.py can merge them with the fresh fetch,
         # accumulating history across runs.
+        #
+        # Important: if a feed file is ALREADY in the repo (committed), keep
+        # it — the committed version is authoritative (e.g. deep twscraper
+        # backfill snapshots) and must not be overwritten by the shallower
+        # Pages-served version that hasn't caught up yet.
         run: |
           mkdir -p feeds
           BASE="https://melroseee-e.github.io/twitter-rss"
-          download_if_feed() {
+          download_if_missing() {
             local name="$1" ext="$2"
+            if [ -s "feeds/${name}.${ext}" ]; then
+              echo "  keep committed feeds/${name}.${ext} ($(wc -c < "feeds/${name}.${ext}")B)"
+              return 0
+            fi
             curl -sL --max-time 40 --retry 2 -o "feeds/${name}.${ext}" \
               "${BASE}/${name}.${ext}" || return 0
             if ! grep -qE "<(rss|entry)|^\\{" "feeds/${name}.${ext}" 2>/dev/null; then
               rm -f "feeds/${name}.${ext}"
+            else
+              echo "  hydrated feeds/${name}.${ext} ($(wc -c < "feeds/${name}.${ext}")B)"
             fi
           }
           # Twitter users (.xml + .json)
@@ -55,15 +66,15 @@ jobs:
             u=$(echo "$line" | awk '{print $1}')
             [ -z "$u" ] && continue
             [[ "$u" =~ ^# ]] && continue
-            download_if_feed "$u" xml
-            download_if_feed "$u" json
+            download_if_missing "$u" xml
+            download_if_missing "$u" json
           done < users.txt
           # Accumulated external feeds (.xml only)
           while IFS= read -r line; do
             name=$(echo "$line" | awk '{print $1}')
             [ -z "$name" ] && continue
             [[ "$name" =~ ^# ]] && continue
-            download_if_feed "$name" xml
+            download_if_missing "$name" xml
           done < accumulate.txt
           ls -la feeds/ | head -40
 
