@@ -163,7 +163,10 @@ def main() -> int:
             time.sleep(0.5)
 
     log.info(f"done: {ok}/{len(entries)} feeds ok")
-    return 0 if ok == len(entries) else 1
+    # Always exit 0 — partial upstream failures are normal (IP blocks, rate
+    # limits). The already-hydrated existing feed on disk is preserved for
+    # any source that failed this run, so the feed doesn't disappear.
+    return 0
 
 
 if __name__ == "__main__":
