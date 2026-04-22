@@ -167,36 +167,68 @@ def _anubis_pass(client: httpx.Client, base: str, html: str, original_url: str, 
         return False
 
 
-def fetch_timeline_htmls(user: str, client: httpx.Client) -> list[tuple[str, str]]:
-    """Fetch timeline HTML from every (base × path) combo with cache-bust.
+# How many extra pages per (base, path) combo to follow via Nitter's
+# "Load more" cursor. 0 = first page only (old behavior).
+# 2 extra pages × 2 paths × 2 bases ≈ up to 12 page fetches per user.
+PAGINATION_EXTRA_PAGES = 2
 
-    Returns list of (label, html). Nitter instances cache per URL including query string,
-    so `?_=<unix_ts>` forces a fresh upstream pull. Merging results across instances +
-    /with_replies variant is the main defense against a single source's stale cache.
+
+def fetch_timeline_htmls(user: str, client: httpx.Client) -> list[tuple[str, str]]:
+    """Fetch timeline HTML from every (base × path) combo with cache-bust + pagination.
+
+    Returns list of (label, html). Nitter instances cache per URL including query
+    string, so `?_=<unix_ts>` forces a fresh upstream pull. Merging results across
+    instances + /with_replies + follow-on pages fights two kinds of staleness:
+    single-source cache lag, and single-page content window.
     """
     cb = int(time.time())
     out: list[tuple[str, str]] = []
     for base in XCANCEL_BASES:
         for path_tmpl in XCANCEL_PATHS:
             path = path_tmpl.format(user=user)
-            url = f"{base}{path}?_={cb}"
-            label = f"{base.split('//', 1)[1]}{path}"
+            label_base = f"{base.split('//', 1)[1]}{path}"
             ua = _ua()
-            try:
-                r = client.get(url, headers={"User-Agent": ua}, timeout=25, follow_redirects=True)
-                text = r.text
-                if ("anubis_challenge" in text) or ("Verifying your request" in text) or ("Making sure you" in text):
-                    log.info(f"[timeline] {label}: Anubis, solving…")
-                    if _anubis_pass(client, base, text, url, ua):
-                        r = client.get(url, headers={"User-Agent": ua}, timeout=25, follow_redirects=True)
-                        text = r.text
-                if r.status_code == 200 and 'class="timeline-item' in text:
-                    log.info(f"[timeline] {label}: OK ({len(text)}b)")
-                    out.append((label, text))
+
+            def fetch(url: str, tag: str) -> Optional[str]:
+                try:
+                    r = client.get(url, headers={"User-Agent": ua}, timeout=25, follow_redirects=True)
+                    text = r.text
+                    if ("anubis_challenge" in text) or ("Verifying your request" in text) or ("Making sure you" in text):
+                        log.info(f"[timeline] {tag}: Anubis, solving…")
+                        if _anubis_pass(client, base, text, url, ua):
+                            r = client.get(url, headers={"User-Agent": ua}, timeout=25, follow_redirects=True)
+                            text = r.text
+                    if r.status_code == 200 and 'class="timeline-item' in text:
+                        log.info(f"[timeline] {tag}: OK ({len(text)}b)")
+                        return text
+                    log.warning(f"[timeline] {tag}: HTTP {r.status_code} no timeline ({len(text)}b)")
+                except Exception as e:
+                    log.warning(f"[timeline] {tag}: {e}")
+                return None
+
+            # First page
+            first_url = f"{base}{path}?_={cb}"
+            page_html = fetch(first_url, label_base)
+            if not page_html:
+                continue
+            out.append((label_base, page_html))
+
+            # Follow "Load more" cursor up to PAGINATION_EXTRA_PAGES times
+            for p in range(1, PAGINATION_EXTRA_PAGES + 1):
+                m = re.search(r'show-more[^>]*><a[^>]+href="([^"]+)"', page_html)
+                if not m:
+                    break
+                next_rel = m.group(1)
+                # href looks like "?cursor=...", so prepend base+path
+                next_url = f"{base}{path}{next_rel}"
+                if "?" in next_url:
+                    next_url += f"&_={cb}"
                 else:
-                    log.warning(f"[timeline] {label}: HTTP {r.status_code} no timeline ({len(text)}b)")
-            except Exception as e:
-                log.warning(f"[timeline] {label}: {e}")
+                    next_url += f"?_={cb}"
+                page_html = fetch(next_url, f"{label_base}#p{p+1}")
+                if not page_html:
+                    break
+                out.append((f"{label_base}#p{p+1}", page_html))
     return out
 
 
@@ -605,6 +637,93 @@ def save_state(user: str, state: dict) -> None:
     (STATE_DIR / f"{user}.json").write_text(json.dumps(state, indent=2))
 
 
+# How many historical items to keep per feed. Large enough that re-subscribing
+# in any reader gets a deep backlog (like OpenAI News does with 900+).
+MAX_ITEMS_PER_FEED = 500
+
+
+def _existing_xml_items(user: str) -> list:
+    """Parse existing <item> elements from the previous feed file, if any.
+    Returns raw ET.Element list so we can splice them back without re-parsing
+    all the HTML content."""
+    p = FEEDS_DIR / f"{user}.xml"
+    if not p.exists():
+        return []
+    try:
+        tree = ET.parse(p)
+        ch = tree.getroot().find("channel")
+        return list(ch.findall("item")) if ch is not None else []
+    except Exception as e:
+        log.warning(f"{user}: could not read existing xml ({e}); starting fresh")
+        return []
+
+
+def _existing_json_items(user: str) -> list[dict]:
+    p = FEEDS_DIR / f"{user}.json"
+    if not p.exists():
+        return []
+    try:
+        return json.loads(p.read_text()).get("items", []) or []
+    except Exception as e:
+        log.warning(f"{user}: could not read existing json ({e}); starting fresh")
+        return []
+
+
+def _rss_item_guid(it) -> str:
+    g = it.findtext("guid") or it.findtext("link") or ""
+    return g.strip()
+
+
+def _rss_item_pubdate(it):
+    from email.utils import parsedate_to_datetime
+    try:
+        return parsedate_to_datetime(it.findtext("pubDate") or "")
+    except Exception:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _build_merged_rss(profile: ProfileMeta, new_entries: list[Entry],
+                     old_items: list, limit: int = MAX_ITEMS_PER_FEED) -> bytes:
+    """Build RSS where new_entries union with old_items (by GUID), top `limit` by pubDate."""
+    fresh_bytes = build_rss(profile, new_entries)
+    tree = ET.fromstring(fresh_bytes)
+    channel = tree.find("channel")
+    new_items = list(channel.findall("item"))
+    new_guids = {_rss_item_guid(it) for it in new_items}
+
+    # Preserve historical items not re-emitted in this run
+    preserved = [it for it in old_items if _rss_item_guid(it) and _rss_item_guid(it) not in new_guids]
+    merged = new_items + preserved
+    merged.sort(key=_rss_item_pubdate, reverse=True)
+    merged = merged[:limit]
+
+    for it in channel.findall("item"):
+        channel.remove(it)
+    for it in merged:
+        channel.append(it)
+    ET.indent(tree, space="  ")
+    return b'<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(tree, encoding="utf-8")
+
+
+def _build_merged_json(profile: ProfileMeta, new_entries: list[Entry],
+                      old_items: list[dict], limit: int = MAX_ITEMS_PER_FEED) -> bytes:
+    fresh_bytes = build_json_feed(profile, new_entries)
+    feed = json.loads(fresh_bytes)
+    new_ids = {it.get("id") for it in feed["items"]}
+    preserved = [it for it in old_items if it.get("id") and it.get("id") not in new_ids]
+    merged = feed["items"] + preserved
+    # sort desc by date_published
+    def dkey(it):
+        from email.utils import parsedate_to_datetime
+        try:
+            return datetime.fromisoformat(it["date_published"].replace("Z", "+00:00"))
+        except Exception:
+            return datetime.min.replace(tzinfo=timezone.utc)
+    merged.sort(key=dkey, reverse=True)
+    feed["items"] = merged[:limit]
+    return json.dumps(feed, ensure_ascii=False, indent=2).encode("utf-8")
+
+
 def process_user(user: str, client: httpx.Client) -> bool:
     htmls = fetch_timeline_htmls(user, client)
     profile: Optional[ProfileMeta] = None
@@ -625,7 +744,7 @@ def process_user(user: str, client: httpx.Client) -> bool:
             per_source.append(len(by_id) - n_before)
         entries = list(by_id.values())
         log.info(
-            f"{user}: merged {len(entries)} unique entries from {len(htmls)} sources "
+            f"{user}: scraped {len(entries)} entries from {len(htmls)} sources "
             f"(per-source new: {per_source})"
         )
     else:
@@ -643,20 +762,34 @@ def process_user(user: str, client: httpx.Client) -> bool:
             avatar="", site_url=f"https://x.com/{user}",
         )
 
-    # Folo dedupes by guid; emit latest 50 fresh each run.
     entries.sort(key=lambda e: e.published, reverse=True)
-    latest = entries[:50]
+    # Cap the newly-serialized batch at MAX_ITEMS_PER_FEED — if Nitter somehow
+    # returns huge amount in one go we still behave.
+    new_batch = entries[:MAX_ITEMS_PER_FEED]
 
-    xml = build_rss(profile, latest)
+    # Merge with prior feed contents so history accumulates across runs.
+    old_xml_items = _existing_xml_items(user)
+    old_json_items = _existing_json_items(user)
+
+    xml = _build_merged_rss(profile, new_batch, old_xml_items)
     (FEEDS_DIR / f"{user}.xml").write_bytes(xml)
-    js = build_json_feed(profile, latest)
+    js = _build_merged_json(profile, new_batch, old_json_items)
     (FEEDS_DIR / f"{user}.json").write_bytes(js)
-    log.info(f"{user}: wrote {len(latest)} entries (xml + json)")
+
+    # Count for log
+    try:
+        total_after = len(ET.fromstring(xml).find("channel").findall("item"))
+    except Exception:
+        total_after = -1
+    log.info(
+        f"{user}: wrote feed ({total_after} total items, "
+        f"{len(new_batch)} from this scrape, {len(old_xml_items)} previously)"
+    )
 
     st = load_state(user)
     ids = [e.id for e in entries]
     new_ids = [i for i in ids if i not in st["seen_ids"]]
-    st["seen_ids"] = (new_ids + st["seen_ids"])[:500]
+    st["seen_ids"] = (new_ids + st["seen_ids"])[:1000]
     save_state(user, st)
     if new_ids:
         log.info(f"{user}: {len(new_ids)} new tweets")

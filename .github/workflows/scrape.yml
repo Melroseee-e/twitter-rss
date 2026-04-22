@@ -35,6 +35,28 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
+      - name: Hydrate feeds/ from last published Pages
+        # Brings the previously-deployed feed xml/json files into the runner
+        # so scraper.py can merge them with the fresh scrape, accumulating history.
+        run: |
+          mkdir -p feeds
+          BASE="https://melroseee-e.github.io/twitter-rss"
+          while IFS= read -r u; do
+            u="$(echo "$u" | xargs)"        # trim
+            [ -z "$u" ] && continue
+            [[ "$u" =~ ^# ]] && continue
+            for ext in xml json; do
+              curl -sL --max-time 25 --retry 2 \
+                -o "feeds/${u}.${ext}" \
+                -w "  hydrated $u.$ext %{http_code} %{size_download}B\n" \
+                "${BASE}/${u}.${ext}" || true
+              # Drop 404 placeholder files
+              if ! grep -qE "<(rss|entry)|^\\{" "feeds/${u}.${ext}" 2>/dev/null; then
+                rm -f "feeds/${u}.${ext}"
+              fi
+            done
+          done < users.txt
+
       - name: Run scraper
         run: python3 scraper.py
 
