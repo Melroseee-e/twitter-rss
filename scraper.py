@@ -18,8 +18,9 @@ import random
 import re
 import sys
 import time
+from urllib.parse import urljoin
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime, parsedate_to_datetime
 from pathlib import Path
 from typing import Optional
@@ -167,22 +168,39 @@ def _anubis_pass(client: httpx.Client, base: str, html: str, original_url: str, 
         return False
 
 
-# How many extra pages per (base, path) combo to follow via Nitter's
-# "Load more" cursor. 0 = first page only (old behavior).
-# 2 extra pages × 2 paths × 2 bases ≈ up to 12 page fetches per user.
-PAGINATION_EXTRA_PAGES = 2
+# Safety cap. Nitter 404s once cursor runs out, so this only kicks in for
+# users whose feed is extremely long AND has no max_days.
+MAX_SAFETY_PAGES = 30
 
 
-def fetch_timeline_htmls(user: str, client: httpx.Client) -> list[tuple[str, str]]:
+def _oldest_page_date(html: str) -> Optional[datetime]:
+    """Best-effort: find the oldest tweet-date on this Nitter page."""
+    dates = []
+    for m in re.finditer(r'tweet-date[^>]*><a[^>]*title="([^"]+)"', html):
+        dt = _parse_date(m.group(1))
+        if dt:
+            dates.append(dt)
+    return min(dates) if dates else None
+
+
+def fetch_timeline_htmls(
+    user: str,
+    client: httpx.Client,
+    *,
+    max_days: Optional[int] = None,
+) -> list[tuple[str, str]]:
     """Fetch timeline HTML from every (base × path) combo with cache-bust + pagination.
 
-    Returns list of (label, html). Nitter instances cache per URL including query
-    string, so `?_=<unix_ts>` forces a fresh upstream pull. Merging results across
-    instances + /with_replies + follow-on pages fights two kinds of staleness:
-    single-source cache lag, and single-page content window.
+    max_days: stop paginating once the oldest item on the current page is older
+              than this many days. None = paginate until cursor exhausts or
+              MAX_SAFETY_PAGES hit.
     """
     cb = int(time.time())
     out: list[tuple[str, str]] = []
+    cutoff = None
+    if max_days is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max_days)
+
     for base in XCANCEL_BASES:
         for path_tmpl in XCANCEL_PATHS:
             path = path_tmpl.format(user=user)
@@ -213,18 +231,26 @@ def fetch_timeline_htmls(user: str, client: httpx.Client) -> list[tuple[str, str
                 continue
             out.append((label_base, page_html))
 
-            # Follow "Load more" cursor up to PAGINATION_EXTRA_PAGES times
-            for p in range(1, PAGINATION_EXTRA_PAGES + 1):
+            # Follow "Load more" cursor
+            seen_cursors: set[str] = set()
+            for p in range(1, MAX_SAFETY_PAGES + 1):
+                # Date-based cutoff: stop if the oldest tweet visible is past cutoff
+                if cutoff is not None:
+                    od = _oldest_page_date(page_html)
+                    if od is not None and od < cutoff:
+                        log.info(f"[timeline] {label_base}: reached max_days={max_days} (oldest {od.date()}), stop paginating")
+                        break
                 m = re.search(r'show-more[^>]*><a[^>]+href="([^"]+)"', page_html)
                 if not m:
                     break
-                next_rel = m.group(1)
-                # href looks like "?cursor=...", so prepend base+path
-                next_url = f"{base}{path}{next_rel}"
-                if "?" in next_url:
-                    next_url += f"&_={cb}"
-                else:
-                    next_url += f"?_={cb}"
+                next_rel = m.group(1).replace("&amp;", "&")
+                # Detect cursor cycles (Nitter sometimes loops the last page at end of timeline)
+                if next_rel in seen_cursors:
+                    log.info(f"[timeline] {label_base}: cursor repeated at page {p+1}, stop")
+                    break
+                seen_cursors.add(next_rel)
+                next_url = urljoin(f"{base}{path}", next_rel)
+                next_url += ("&" if "?" in next_url else "?") + f"_={cb}"
                 page_html = fetch(next_url, f"{label_base}#p{p+1}")
                 if not page_html:
                     break
@@ -724,8 +750,8 @@ def _build_merged_json(profile: ProfileMeta, new_entries: list[Entry],
     return json.dumps(feed, ensure_ascii=False, indent=2).encode("utf-8")
 
 
-def process_user(user: str, client: httpx.Client) -> bool:
-    htmls = fetch_timeline_htmls(user, client)
+def process_user(user: str, client: httpx.Client, *, max_days: Optional[int] = None) -> bool:
+    htmls = fetch_timeline_htmls(user, client, max_days=max_days)
     profile: Optional[ProfileMeta] = None
     entries: list[Entry] = []
     if htmls:
@@ -846,9 +872,35 @@ def parse_jina_markdown(md: str, profile_user: str) -> list[Entry]:
     return entries
 
 
+def _parse_users_file(path: Path) -> list[tuple[str, Optional[int]]]:
+    """Parse users.txt lines; each returns (handle, max_days_or_None).
+
+    Supported lines:
+      elonmusk              # default: no day cap, paginate until safety limit
+      elonmusk max_days=730 # stop paginating past this age
+      # any comment
+    """
+    out: list[tuple[str, Optional[int]]] = []
+    for raw in path.read_text().splitlines():
+        ln = raw.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        parts = ln.split()
+        handle = parts[0].lstrip("@")
+        max_days: Optional[int] = None
+        for p in parts[1:]:
+            if p.startswith("max_days="):
+                try: max_days = int(p.split("=", 1)[1])
+                except ValueError: pass
+        out.append((handle, max_days))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--user", help="single handle (overrides users.txt)")
+    ap.add_argument("--max-days", type=int, default=None,
+                    help="override: only scrape items newer than N days")
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
@@ -858,24 +910,25 @@ def main():
     )
 
     if args.user:
-        users = [args.user]
+        configs = [(args.user, args.max_days)]
     else:
         if not USERS_FILE.exists():
             log.error(f"{USERS_FILE} missing. Create it (one handle per line).")
             sys.exit(2)
-        users = [ln.strip().lstrip("@") for ln in USERS_FILE.read_text().splitlines()
-                 if ln.strip() and not ln.strip().startswith("#")]
+        configs = _parse_users_file(USERS_FILE)
 
     FEEDS_DIR.mkdir(parents=True, exist_ok=True)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 
     with httpx.Client(http2=True) as client:
         ok = 0
-        for u in users:
-            if process_user(u, client):
+        for handle, max_days in configs:
+            label = f"{handle} (max_days={max_days})" if max_days else f"{handle} (deep)"
+            log.info(f"--- processing {label} ---")
+            if process_user(handle, client, max_days=max_days):
                 ok += 1
             time.sleep(random.uniform(1.0, 3.0))
-    log.info(f"done: {ok}/{len(users)} users ok")
+    log.info(f"done: {ok}/{len(configs)} users ok")
 
 
 if __name__ == "__main__":

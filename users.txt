@@ -1,4 +1,7 @@
-elonmusk
-karpathy
-shao__meng
+# Format: <handle>  [max_days=N]
+# Without max_days → paginate until cursor exhausts or MAX_SAFETY_PAGES hit (deep history).
+# With max_days=N → stop paginating once oldest item on current page is older than N days.
+elonmusk     max_days=730
+karpathy     max_days=730
+shao__meng   max_days=730
 Morris_LT

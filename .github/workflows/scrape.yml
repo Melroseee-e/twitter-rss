@@ -37,28 +37,43 @@ jobs:
 
       - name: Hydrate feeds/ from last published Pages
         # Brings the previously-deployed feed xml/json files into the runner
-        # so scraper.py can merge them with the fresh scrape, accumulating history.
+        # so scraper.py and accumulate.py can merge them with the fresh fetch,
+        # accumulating history across runs.
         run: |
           mkdir -p feeds
           BASE="https://melroseee-e.github.io/twitter-rss"
-          while IFS= read -r u; do
-            u="$(echo "$u" | xargs)"        # trim
+          download_if_feed() {
+            local name="$1" ext="$2"
+            curl -sL --max-time 40 --retry 2 -o "feeds/${name}.${ext}" \
+              "${BASE}/${name}.${ext}" || return 0
+            if ! grep -qE "<(rss|entry)|^\\{" "feeds/${name}.${ext}" 2>/dev/null; then
+              rm -f "feeds/${name}.${ext}"
+            fi
+          }
+          # Twitter users (.xml + .json)
+          while IFS= read -r line; do
+            u=$(echo "$line" | awk '{print $1}')
             [ -z "$u" ] && continue
             [[ "$u" =~ ^# ]] && continue
-            for ext in xml json; do
-              curl -sL --max-time 25 --retry 2 \
-                -o "feeds/${u}.${ext}" \
-                -w "  hydrated $u.$ext %{http_code} %{size_download}B\n" \
-                "${BASE}/${u}.${ext}" || true
-              # Drop 404 placeholder files
-              if ! grep -qE "<(rss|entry)|^\\{" "feeds/${u}.${ext}" 2>/dev/null; then
-                rm -f "feeds/${u}.${ext}"
-              fi
-            done
+            download_if_feed "$u" xml
+            download_if_feed "$u" json
           done < users.txt
+          # Accumulated external feeds (.xml only)
+          while IFS= read -r line; do
+            name=$(echo "$line" | awk '{print $1}')
+            [ -z "$name" ] && continue
+            [[ "$name" =~ ^# ]] && continue
+            download_if_feed "$name" xml
+          done < accumulate.txt
+          ls -la feeds/ | head -40
 
-      - name: Run scraper
+      - name: Run Twitter scraper
         run: python3 scraper.py
+
+      - name: Run accumulator (podcast / AI / crypto mirrors)
+        env:
+          RSSHUB_KEY: ${{ secrets.RSSHUB_KEY }}
+        run: python3 accumulate.py
 
       - name: Build Pages site (index + feeds)
         run: |

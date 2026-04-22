@@ -1,0 +1,22 @@
+# Mirror + accumulate external RSS feeds into our Pages.
+# Each entry: <output_name>  <source_url>
+# Output becomes https://melroseee-e.github.io/twitter-rss/<output_name>.xml
+# RSSHub URLs use ${RSSHUB_KEY} placeholder — workflow injects it from repo secret.
+
+# Podcast — full history preserved forever
+dwarkesh-podcast      https://www.dwarkesh.com/feed
+a16z-show             https://feeds.simplecast.com/JGE3yC0V
+xiaoyuzhou-gu101      http://66.154.109.148:1200/xiaoyuzhou/podcast/5e5c52c9418a84a04625e6cc?key=${RSSHUB_KEY}
+yt-gu101              http://66.154.109.148:1200/youtube/channel/UCKV2yWPB3wn0RTZh3cTD8YA?key=${RSSHUB_KEY}
+yt-xiaolin            http://66.154.109.148:1200/youtube/channel/UCilwQlk62k1z7aUEZPOB6yw?key=${RSSHUB_KEY}
+yt-lex-fridman        http://66.154.109.148:1200/youtube/channel/UCSHZKyawb77ixDdsGog4iWA?key=${RSSHUB_KEY}
+yt-ycombinator        http://66.154.109.148:1200/youtube/channel/UCcefcZRL2oaA_uBNeo5UOWg?key=${RSSHUB_KEY}
+
+# AI — full history preserved
+openai-news           https://openai.com/news/rss.xml
+juya-ai-daily         https://imjuya.github.io/juya-ai-daily/rss.xml
+anthropic-engineering http://66.154.109.148:1200/anthropic/engineering?key=${RSSHUB_KEY}
+anthropic-research    http://66.154.109.148:1200/anthropic/research?key=${RSSHUB_KEY}
+
+# Crypto — accumulate (TechFlow user said not needed)
+a16z-crypto           https://a16zcrypto.substack.com/feed
