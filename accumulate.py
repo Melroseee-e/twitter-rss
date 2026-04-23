@@ -78,6 +78,30 @@ def item_date(it: ET.Element) -> datetime:
         return datetime.min.replace(tzinfo=timezone.utc)
 
 
+# Register common RSS namespace prefixes so ElementTree serializes them with
+# their real names (e.g. <content:encoded>) instead of auto-generated ns0/ns1
+# etc. Many readers (Reeder among them) match `<content:encoded>` by prefix
+# rather than by namespace URI — lose the prefix and they fall back to the
+# plaintext <description>, killing rich HTML rendering.
+_NS = {
+    "content": "http://purl.org/rss/1.0/modules/content/",
+    "dc":      "http://purl.org/dc/elements/1.1/",
+    "atom":    "http://www.w3.org/2005/Atom",
+    "itunes":  "http://www.itunes.com/dtds/podcast-1.0.dtd",
+    "media":   "http://search.yahoo.com/mrss/",
+    "sy":      "http://purl.org/rss/1.0/modules/syndication/",
+    "webfeeds":"http://webfeeds.org/rss/1.0",
+    "wfw":     "http://wellformedweb.org/CommentAPI/",
+    "slash":   "http://purl.org/rss/1.0/modules/slash/",
+    "cc":      "http://web.resource.org/cc/",
+    "georss":  "http://www.georss.org/georss",
+    "geo":     "http://www.w3.org/2003/01/geo/wgs84_pos#",
+    "podcast": "https://podcastindex.org/namespace/1.0",
+}
+for _p, _u in _NS.items():
+    ET.register_namespace(_p, _u)
+
+
 def merge(source_bytes: bytes, existing_path: Path, limit: int = MAX_ITEMS) -> bytes:
     """Parse source RSS 2.0; merge its items with existing file (if any)."""
     source_root = ET.fromstring(source_bytes)
