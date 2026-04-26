@@ -86,6 +86,11 @@ jobs:
           RSSHUB_KEY: ${{ secrets.RSSHUB_KEY }}
         run: python3 accumulate.py
 
+      - name: Merge grouped feeds (e.g. ai-funding)
+        # Rebuilds each merged feed fresh from the just-accumulated source
+        # feeds on disk. No hydration needed — sources already hold history.
+        run: python3 merge_feeds.py
+
       - name: Build Pages site (index + feeds)
         run: |
           mkdir -p _site

@@ -1,0 +1,7 @@
+# Merge multiple already-accumulated feeds into one combined feed.
+# Format: <output_name>  <src1> <src2> ...
+# Sources must already exist as feeds/<src>.xml (produced by accumulate.py).
+# Output goes to feeds/<output_name>.xml → published at
+# https://melroseee-e.github.io/twitter-rss/<output_name>.xml
+
+ai-funding   crunchbase-ai cbinsights-research ai-funding-tracker
