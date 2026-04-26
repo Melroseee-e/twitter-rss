@@ -23,6 +23,8 @@ ROOT = Path(__file__).parent
 FEEDS_DIR = ROOT / "feeds"
 MAX_ITEMS = 5000
 
+ARXIV_ICON = "https://static.arxiv.org/static/browse/0.3.4/images/icons/apple-touch-icon.png"
+
 ATOM = "{http://www.w3.org/2005/Atom}"
 ARXIV = "{http://arxiv.org/schemas/atom}"
 
@@ -175,12 +177,17 @@ def build(name: str, new_items: list[ET.Element], title: str, desc: str) -> byte
 
     out = ET.Element("rss", {"version": "2.0"})
     channel = ET.SubElement(out, "channel")
+    link_text = f"https://melroseee-e.github.io/twitter-rss/{name}.xml"
     ET.SubElement(channel, "title").text = title
-    ET.SubElement(channel, "link").text = f"https://melroseee-e.github.io/twitter-rss/{name}.xml"
+    ET.SubElement(channel, "link").text = link_text
     ET.SubElement(channel, "description").text = desc
     ET.SubElement(channel, "language").text = "en"
     ET.SubElement(channel, "lastBuildDate").text = format_datetime(datetime.now(timezone.utc))
     ET.SubElement(channel, "ttl").text = "60"
+    img = ET.SubElement(channel, "image")
+    ET.SubElement(img, "url").text = ARXIV_ICON
+    ET.SubElement(img, "title").text = title
+    ET.SubElement(img, "link").text = link_text
     for it in items:
         channel.append(it)
 

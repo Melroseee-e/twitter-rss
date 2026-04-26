@@ -28,6 +28,14 @@ CONFIG = ROOT / "merge_feeds.txt"
 
 MAX_ITEMS = 5000
 
+# Per-output channel icon. RSS readers (Reeder, Folo) pick this up as the
+# feed's avatar. Folo caches metadata by URL — if you change this AFTER
+# subscribing, append `?v=N` to the feed URL to force re-registration.
+ARXIV_ICON = "https://static.arxiv.org/static/browse/0.3.4/images/icons/apple-touch-icon.png"
+ICONS: dict[str, str] = {
+    "quant-papers": ARXIV_ICON,
+}
+
 log = logging.getLogger("merge_feeds")
 
 # Mirror accumulate.py's namespace registrations so prefixes (content:encoded,
@@ -125,12 +133,19 @@ def build_merged(name: str, sources: list[str]) -> bytes:
 
     rss = ET.Element("rss", {"version": "2.0"})
     channel = ET.SubElement(rss, "channel")
-    ET.SubElement(channel, "title").text = f"Merged: {name}"
-    ET.SubElement(channel, "link").text = f"https://melroseee-e.github.io/twitter-rss/{name}.xml"
+    title_text = f"Merged: {name}"
+    link_text = f"https://melroseee-e.github.io/twitter-rss/{name}.xml"
+    ET.SubElement(channel, "title").text = title_text
+    ET.SubElement(channel, "link").text = link_text
     ET.SubElement(channel, "description").text = "Merged feed of: " + ", ".join(feed_titles)
     ET.SubElement(channel, "language").text = "en"
     ET.SubElement(channel, "lastBuildDate").text = format_datetime(datetime.now(timezone.utc))
     ET.SubElement(channel, "ttl").text = "15"
+    if name in ICONS:
+        img = ET.SubElement(channel, "image")
+        ET.SubElement(img, "url").text = ICONS[name]
+        ET.SubElement(img, "title").text = title_text
+        ET.SubElement(img, "link").text = link_text
     for it in items:
         channel.append(it)
 
