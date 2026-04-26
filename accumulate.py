@@ -29,7 +29,15 @@ CONFIG = ROOT / "accumulate.txt"
 # is generous and comfortably fits any real-world feed size.
 MAX_ITEMS = 5000
 
-UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4"
+UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+HEADERS = {
+    "User-Agent": UA,
+    "Accept": "application/rss+xml,application/xml,text/xml,*/*;q=0.9",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+}
 log = logging.getLogger("accumulate")
 
 
@@ -56,7 +64,7 @@ def parse_config(path: Path) -> list[tuple[str, str]]:
 
 def fetch(url: str, client: httpx.Client) -> bytes | None:
     try:
-        r = client.get(url, headers={"User-Agent": UA}, timeout=60)
+        r = client.get(url, headers=HEADERS, timeout=60)
         if r.status_code == 200 and len(r.content) > 100 and b"<rss" in r.content[:2000]:
             return r.content
         log.warning(f"fetch {url}: HTTP {r.status_code} size={len(r.content)}")

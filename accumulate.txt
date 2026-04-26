@@ -18,6 +18,11 @@ juya-ai-daily         https://imjuya.github.io/juya-ai-daily/rss.xml
 anthropic-engineering http://66.154.109.148:1200/anthropic/engineering?key=${RSSHUB_KEY}
 anthropic-research    http://66.154.109.148:1200/anthropic/research?key=${RSSHUB_KEY}
 
+# AI funding — venture/deal coverage (PitchBook deferred — Cloudflare blocks all access)
+crunchbase-ai         https://news.crunchbase.com/sections/ai/feed/
+cbinsights-research   https://www.cbinsights.com/research/feed/
+ai-funding-tracker    https://aifundingtracker.com/feed/
+
 # Crypto — a16z-crypto removed: Substack 403s both GitHub Actions IPs
 # and our ai datacenter IP. Subscribe directly to the Substack URL in
 # Reeder instead (Substack serves the user's residential IP fine).
