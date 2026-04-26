@@ -76,6 +76,10 @@ jobs:
             [[ "$name" =~ ^# ]] && continue
             download_if_missing "$name" xml
           done < accumulate.txt
+          # Custom-scraped feeds that also need history preserved across runs
+          # (rebuilt by arxiv_search.py — needs the previous on-disk file to
+          # merge new arXiv results with older accumulated entries).
+          download_if_missing cs-lg-quant xml
           ls -la feeds/ | head -40
 
       - name: Run Twitter scraper
@@ -85,6 +89,9 @@ jobs:
         env:
           RSSHUB_KEY: ${{ secrets.RSSHUB_KEY }}
         run: python3 accumulate.py
+
+      - name: Run arXiv search queries (cs.LG quant filter)
+        run: python3 arxiv_search.py
 
       - name: Merge grouped feeds (e.g. ai-funding)
         # Rebuilds each merged feed fresh from the just-accumulated source

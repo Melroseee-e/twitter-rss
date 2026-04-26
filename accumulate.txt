@@ -23,6 +23,10 @@ crunchbase-ai         https://news.crunchbase.com/sections/ai/feed/
 cbinsights-research   https://www.cbinsights.com/research/feed/
 ai-funding-tracker    https://aifundingtracker.com/feed/
 
+# Quant papers — arXiv q-fin (all subcats: TR, PM, ST, MF, RM, CP, GN, EC).
+# Empty on weekends; populates Mon-Fri UTC. accumulate.py preserves history.
+q-fin-arxiv           https://rss.arxiv.org/rss/q-fin
+
 # Crypto — a16z-crypto removed: Substack 403s both GitHub Actions IPs
 # and our ai datacenter IP. Subscribe directly to the Substack URL in
 # Reeder instead (Substack serves the user's residential IP fine).
