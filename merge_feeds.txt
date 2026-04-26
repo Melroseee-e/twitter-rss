@@ -5,4 +5,4 @@
 # https://melroseee-e.github.io/twitter-rss/<output_name>.xml
 
 ai-funding    crunchbase-ai cbinsights-research ai-funding-tracker
-quant-papers  q-fin-arxiv cs-lg-quant
+quant-papers  q-fin-arxiv quant-llm

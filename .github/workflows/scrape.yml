@@ -79,7 +79,7 @@ jobs:
           # Custom-scraped feeds that also need history preserved across runs
           # (rebuilt by arxiv_search.py — needs the previous on-disk file to
           # merge new arXiv results with older accumulated entries).
-          download_if_missing cs-lg-quant xml
+          download_if_missing quant-llm xml
           ls -la feeds/ | head -40
 
       - name: Run Twitter scraper

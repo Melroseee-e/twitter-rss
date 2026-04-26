@@ -29,11 +29,24 @@ ARXIV = "{http://arxiv.org/schemas/atom}"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 
 # name -> (search_query, channel_title, channel_description)
+#
+# Design note on `quant-llm`:
+#   The intersection target is "LLMs applied to quant/finance/economics".
+#   Naïvely AND-ing finance keywords with LLM keywords across all categories
+#   floods with false positives — `transformer`/`GPT`/`LLM` appear in
+#   essentially any modern ML paper, and `market`/`trading` show up casually
+#   in unrelated abstracts. The reliable signal is the SUBMITTER'S category
+#   choice: papers actually about finance/economics get tagged q-fin.* or
+#   econ.*. So we restrict to those categories AND require an LLM keyword.
+#   "agentic" is intentionally excluded — it false-positives on classical
+#   agent-based market-microstructure simulation papers.
 QUERIES: dict[str, tuple[str, str, str]] = {
-    "cs-lg-quant": (
-        'cat:cs.LG AND (abs:trading OR abs:portfolio OR abs:market OR abs:financial OR abs:"limit order book")',
-        "arXiv cs.LG — Quant / Finance Filter",
-        "cs.LG papers whose abstract mentions trading, portfolio, market, financial, or limit order book.",
+    "quant-llm": (
+        '(cat:q-fin.CP OR cat:q-fin.TR OR cat:q-fin.PM OR cat:q-fin.ST OR cat:q-fin.MF OR cat:q-fin.RM OR cat:q-fin.GN OR cat:q-fin.EC OR cat:econ.GN OR cat:econ.EM OR cat:econ.TH)'
+        ' AND '
+        '(abs:LLM OR abs:"large language model" OR abs:"language model" OR abs:transformer OR abs:GPT OR abs:"foundation model")',
+        "arXiv — LLMs in Quant / Finance / Economics",
+        "Papers categorized under q-fin.* or econ.* whose abstract mentions LLMs, language models, transformers, GPT, or foundation models.",
     ),
 }
 
