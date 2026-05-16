@@ -76,6 +76,8 @@ class Entry:
     media: list[Media] = field(default_factory=list)
     quoted: Optional["Entry"] = None
     categories: list[str] = field(default_factory=list)  # hashtags + @mentions
+    is_reply: bool = False
+    reply_to_handle: Optional[str] = None
 
 
 @dataclass
@@ -382,6 +384,17 @@ def parse_xcancel_html(html: str, profile_user: str) -> list[Entry]:
         author_handle, tid = m.group(1), m.group(2)
 
         is_rt = item.select_one("div.retweet-header") is not None
+        # Reply detection: Nitter shows `<div class="replying-to">Replying to @<user></div>`
+        # in the body of any reply tweet. Make sure we don't pick up one nested
+        # inside a quoted tweet (which we shouldn't classify as a reply).
+        is_reply = False
+        reply_to_handle: Optional[str] = None
+        rep_el = item.select_one("div.replying-to")
+        if rep_el and not rep_el.find_parent("div", class_="quote"):
+            is_reply = True
+            rep_a = rep_el.select_one("a")
+            if rep_a and rep_a.get_text(strip=True).startswith("@"):
+                reply_to_handle = rep_a.get_text(strip=True).lstrip("@")
         fullname_el = item.select_one("a.fullname")
         author_name = fullname_el.get_text(strip=True) if fullname_el else author_handle
         avatar_img = item.select_one("a.tweet-avatar img")
@@ -473,6 +486,8 @@ def parse_xcancel_html(html: str, profile_user: str) -> list[Entry]:
             media=media,
             quoted=quoted,
             categories=_extract_categories(text + " " + (quoted.text if quoted else "")),
+            is_reply=is_reply,
+            reply_to_handle=reply_to_handle,
         )
         e.html = render_html(e)
         entries.append(e)
@@ -751,7 +766,76 @@ def _build_merged_json(profile: ProfileMeta, new_entries: list[Entry],
     return json.dumps(feed, ensure_ascii=False, indent=2).encode("utf-8")
 
 
-def process_user(user: str, client: httpx.Client, *, max_days: Optional[int] = None) -> bool:
+_OLD_REPLY_SHORT_LIMIT = 30  # chars
+_AVATAR_IMG_HINT = "profile_images"
+
+
+def _looks_like_old_reply_html(content: str, title: str, description: str) -> bool:
+    """Heuristic for items written by earlier scraper versions that lacked is_reply.
+
+    Drop only when ALL of these hold:
+      - not a retweet (title doesn't start with the 🔁 RT prefix)
+      - no quoted tweet (<blockquote> absent)
+      - description ≤ 30 chars (short reaction text)
+      - no media beyond the avatar (no non-avatar <img>, no <video>)
+    This catches one-word reactions like 'True' / '💯' / 'Yeah' which are
+    almost always replies on Elon's timeline. We deliberately keep short items
+    that include media — they may be product-photo posts rather than replies.
+    """
+    if title.startswith("🔁"):
+        return False
+    if "<blockquote>" in content:
+        return False
+    if len(description.strip()) > _OLD_REPLY_SHORT_LIMIT:
+        return False
+    if "<video" in content:
+        return False
+    imgs = re.findall(r'<img[^>]+src="([^"]+)"', content)
+    if any(_AVATAR_IMG_HINT not in u for u in imgs):
+        return False
+    return True
+
+
+def _filter_old_xml_replies(items: list) -> list:
+    NS_CONTENT = "{http://purl.org/rss/1.0/modules/content/}encoded"
+    kept = []
+    dropped = 0
+    for it in items:
+        title = (it.findtext("title") or "")
+        desc = (it.findtext("description") or "")
+        content = it.findtext(NS_CONTENT) or ""
+        if _looks_like_old_reply_html(content, title, desc):
+            dropped += 1
+            continue
+        kept.append(it)
+    if dropped:
+        log.info(f"  filtered {dropped} historical reply-like items from XML")
+    return kept
+
+
+def _filter_old_json_replies(items: list[dict]) -> list[dict]:
+    kept = []
+    dropped = 0
+    for it in items:
+        title = it.get("title") or ""
+        desc = it.get("summary") or ""
+        content = it.get("content_html") or ""
+        if _looks_like_old_reply_html(content, title, desc):
+            dropped += 1
+            continue
+        kept.append(it)
+    if dropped:
+        log.info(f"  filtered {dropped} historical reply-like items from JSON")
+    return kept
+
+
+def process_user(
+    user: str,
+    client: httpx.Client,
+    *,
+    max_days: Optional[int] = None,
+    no_replies: bool = False,
+) -> bool:
     htmls = fetch_timeline_htmls(user, client, max_days=max_days)
     profile: Optional[ProfileMeta] = None
     entries: list[Entry] = []
@@ -789,6 +873,11 @@ def process_user(user: str, client: httpx.Client, *, max_days: Optional[int] = N
             avatar="", site_url=f"https://x.com/{user}",
         )
 
+    if no_replies:
+        before = len(entries)
+        entries = [e for e in entries if not e.is_reply]
+        log.info(f"{user}: filtered {before - len(entries)} replies (no_replies=1), kept {len(entries)}")
+
     entries.sort(key=lambda e: e.published, reverse=True)
     # Cap the newly-serialized batch at MAX_ITEMS_PER_FEED — if Nitter somehow
     # returns huge amount in one go we still behave.
@@ -797,6 +886,9 @@ def process_user(user: str, client: httpx.Client, *, max_days: Optional[int] = N
     # Merge with prior feed contents so history accumulates across runs.
     old_xml_items = _existing_xml_items(user)
     old_json_items = _existing_json_items(user)
+    if no_replies:
+        old_xml_items = _filter_old_xml_replies(old_xml_items)
+        old_json_items = _filter_old_json_replies(old_json_items)
 
     xml = _build_merged_rss(profile, new_batch, old_xml_items)
     (FEEDS_DIR / f"{user}.xml").write_bytes(xml)
@@ -873,15 +965,17 @@ def parse_jina_markdown(md: str, profile_user: str) -> list[Entry]:
     return entries
 
 
-def _parse_users_file(path: Path) -> list[tuple[str, Optional[int]]]:
-    """Parse users.txt lines; each returns (handle, max_days_or_None).
+def _parse_users_file(path: Path) -> list[tuple[str, Optional[int], bool]]:
+    """Parse users.txt lines; each returns (handle, max_days_or_None, no_replies).
 
     Supported lines:
-      elonmusk              # default: no day cap, paginate until safety limit
-      elonmusk max_days=730 # stop paginating past this age
+      elonmusk                          # default: no day cap, paginate until safety limit
+      elonmusk max_days=730             # stop paginating past this age
+      elonmusk no_replies               # drop reply tweets (incl. self-threads)
+      elonmusk max_days=730 no_replies  # both
       # any comment
     """
-    out: list[tuple[str, Optional[int]]] = []
+    out: list[tuple[str, Optional[int], bool]] = []
     for raw in path.read_text().splitlines():
         ln = raw.strip()
         if not ln or ln.startswith("#"):
@@ -889,11 +983,14 @@ def _parse_users_file(path: Path) -> list[tuple[str, Optional[int]]]:
         parts = ln.split()
         handle = parts[0].lstrip("@")
         max_days: Optional[int] = None
+        no_replies = False
         for p in parts[1:]:
             if p.startswith("max_days="):
                 try: max_days = int(p.split("=", 1)[1])
                 except ValueError: pass
-        out.append((handle, max_days))
+            elif p == "no_replies":
+                no_replies = True
+        out.append((handle, max_days, no_replies))
     return out
 
 
@@ -902,6 +999,8 @@ def main():
     ap.add_argument("--user", help="single handle (overrides users.txt)")
     ap.add_argument("--max-days", type=int, default=None,
                     help="override: only scrape items newer than N days")
+    ap.add_argument("--no-replies", action="store_true",
+                    help="override: drop reply tweets for this run (incl. self-threads)")
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
@@ -911,22 +1010,37 @@ def main():
     )
 
     if args.user:
-        configs = [(args.user, args.max_days)]
+        # Pick up users.txt defaults for this handle (max_days, no_replies),
+        # then let CLI flags override.
+        defaults = {h: (d, nr) for (h, d, nr) in _parse_users_file(USERS_FILE)} if USERS_FILE.exists() else {}
+        d_md, d_nr = defaults.get(args.user, (None, False))
+        md = args.max_days if args.max_days is not None else d_md
+        nr = True if args.no_replies else d_nr
+        configs = [(args.user, md, nr)]
     else:
         if not USERS_FILE.exists():
             log.error(f"{USERS_FILE} missing. Create it (one handle per line).")
             sys.exit(2)
         configs = _parse_users_file(USERS_FILE)
+        if args.no_replies:
+            configs = [(h, d, True) for (h, d, _) in configs]
 
     FEEDS_DIR.mkdir(parents=True, exist_ok=True)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 
     with httpx.Client(http2=True) as client:
         ok = 0
-        for handle, max_days in configs:
-            label = f"{handle} (max_days={max_days})" if max_days else f"{handle} (deep)"
+        for handle, max_days, no_replies in configs:
+            tags = []
+            if max_days:
+                tags.append(f"max_days={max_days}")
+            else:
+                tags.append("deep")
+            if no_replies:
+                tags.append("no_replies")
+            label = f"{handle} ({', '.join(tags)})"
             log.info(f"--- processing {label} ---")
-            if process_user(handle, client, max_days=max_days):
+            if process_user(handle, client, max_days=max_days, no_replies=no_replies):
                 ok += 1
             time.sleep(random.uniform(1.0, 3.0))
     log.info(f"done: {ok}/{len(configs)} users ok")
