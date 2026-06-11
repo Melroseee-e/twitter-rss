@@ -14,7 +14,9 @@ yt-ycombinator        http://66.154.109.148:1200/youtube/channel/UCcefcZRL2oaA_u
 
 # AI — full history preserved
 openai-news           https://openai.com/news/rss.xml
-juya-ai-daily         https://imjuya.github.io/juya-ai-daily/rss.xml
+# juya-ai-daily: 橘鸦 2026-06 删了 imjuya GitHub 源(整个账号 404)。改抓他 YouTube @imjuya——
+# 视频简介=带链接的全文早报，走现成 youtube 转换通道(免 cookie、不怕美国 IP)。chan=UCIDll3SRcbHwwcXbrwvBZNw
+juya-ai-daily         http://66.154.109.148:1200/youtube/channel/UCIDll3SRcbHwwcXbrwvBZNw?key=${RSSHUB_KEY}
 anthropic-engineering http://66.154.109.148:1200/anthropic/engineering?key=${RSSHUB_KEY}
 anthropic-research    http://66.154.109.148:1200/anthropic/research?key=${RSSHUB_KEY}
 
