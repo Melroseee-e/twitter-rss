@@ -1,0 +1,15 @@
+name: yt-probe
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: probe youtube native feed from Actions IP
+        run: |
+          echo "runner public IP: $(curl -s https://api.ipify.org)"
+          for cid in UCIDll3SRcbHwwcXbrwvBZNw UCSHZKyawb77ixDdsGog4iWA; do
+            code=$(curl -s -o /tmp/n.xml -w '%{http_code}' \
+              "https://www.youtube.com/feeds/videos.xml?channel_id=$cid")
+            echo "channel $cid -> HTTP $code  size=$(wc -c </tmp/n.xml)B  entries=$(grep -c '<entry>' /tmp/n.xml 2>/dev/null || echo 0)"
+            head -c 160 /tmp/n.xml; echo
+          done
