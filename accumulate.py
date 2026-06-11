@@ -9,6 +9,7 @@ Handles RSS 2.0. Atom is not handled here (none of our sources are Atom).
 """
 from __future__ import annotations
 
+import html
 import logging
 import os
 import re
@@ -110,7 +111,87 @@ for _p, _u in _NS.items():
     ET.register_namespace(_p, _u)
 
 
-def merge(source_bytes: bytes, existing_path: Path, limit: int = MAX_ITEMS) -> bytes:
+# --- 橘鸦 AI 早报 排版器 -------------------------------------------------------
+# 橘鸦的官方 GitHub RSS(已随账号被封而死)是排好版的富文本;现在只能抓他 YouTube,
+# 而 YouTube 简介是一坨"标题 时间戳 裸链接…"的章节流水账。这里把它还原成
+# 「每条新闻 = 小标题 + 来源链接列表」的干净 HTML(<content:encoded>)。幂等。
+_CONTENT_ENC = "{http://purl.org/rss/1.0/modules/content/}encoded"
+_TS_RE = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")   # YouTube 章节时间戳 00:09 / 1:23:45
+_URL_RE = re.compile(r"^https?://")
+
+
+def _domain(u: str) -> str:
+    m = re.match(r"https?://([^/]+)", u)
+    return (m.group(1) if m else u).replace("www.", "")
+
+
+def format_juya_description(text: str) -> tuple[str | None, list[str]]:
+    """YouTube 章节式简介 → (HTML, [各条标题])。不像章节列表则返回 (None, [])."""
+    raw = text or ""
+    m_img = re.search(r'<img[^>]+src="([^"]+)"', raw)   # 抽 youtube 缩略图当封面
+    cover = m_img.group(1) if m_img else None
+    raw = re.sub(r"(?i)<br\s*/?>", "\n", raw)            # <br/> → 换行
+    raw = re.sub(r"<[^>]+>", " ", raw)                   # 去掉 <img> 等其它标签
+    toks = html.unescape(raw).replace("　", " ").split()
+    items: list[tuple[str, list[str]]] = []
+    title: list[str] = []
+    urls: list[str] = []
+    state = "title"
+
+    def flush() -> None:
+        t = " ".join(title).strip()
+        if t and t.lower() != "intro" and urls:   # 跳过 Intro 与无链接的尾巴
+            items.append((t, urls.copy()))
+
+    for tok in toks:
+        if _TS_RE.match(tok):
+            state = "urls"
+            continue
+        if _URL_RE.match(tok):
+            urls.append(tok)
+            continue
+        if state == "urls":           # url 之后又冒出文字 = 下一条新闻开始
+            flush()
+            title.clear()
+            urls.clear()
+            title.append(tok)
+            state = "title"
+        else:
+            title.append(tok)
+    flush()
+
+    if not items:
+        return None, []
+    parts: list[str] = []
+    if cover:
+        parts.append(f'<p><img src="{html.escape(cover)}"/></p>')
+    for t, us in items:
+        lis = "".join(
+            f'<li><a href="{html.escape(u)}">{html.escape(_domain(u))}</a></li>'
+            for u in us
+        )
+        parts.append(f"<h3>{html.escape(t)}</h3>\n<ul>{lis}</ul>")
+    return "\n".join(parts), [t for t, _ in items]
+
+
+def juya_format_item(it: ET.Element) -> None:
+    """给一条橘鸦 YouTube item 幂等地补上干净 <content:encoded> + 清爽 description."""
+    if it.find(_CONTENT_ENC) is not None:
+        return  # 已格式化(或本就是橘鸦旧 GitHub 富文本条目)→ 不动
+    body, titles = format_juya_description(it.findtext("description") or "")
+    if not body:
+        return  # 不是章节式简介 → 原样保留
+    ET.SubElement(it, _CONTENT_ENC).text = body
+    desc = it.find("description")
+    summary = "｜".join(titles)
+    if desc is not None:
+        desc.text = summary
+    else:
+        ET.SubElement(it, "description").text = summary
+
+
+def merge(source_bytes: bytes, existing_path: Path, limit: int = MAX_ITEMS,
+          item_transform=None) -> bytes:
     """Parse source RSS 2.0; merge its items with existing file (if any)."""
     source_root = ET.fromstring(source_bytes)
     channel = source_root.find("channel")
@@ -136,6 +217,13 @@ def merge(source_bytes: bytes, existing_path: Path, limit: int = MAX_ITEMS) -> b
     new_items.sort(key=item_date, reverse=True)
     new_items = new_items[:limit]
 
+    if item_transform:
+        for it in new_items:
+            try:
+                item_transform(it)
+            except Exception as e:
+                log.warning(f"item_transform failed on an item: {e}")
+
     # Replace items in source with merged set
     for it in list(channel.findall("item")):
         channel.remove(it)
@@ -158,8 +246,9 @@ def process_one(name: str, url: str, client: httpx.Client) -> bool:
     source = fetch(url, client)
     if source is None:
         return False
+    transform = juya_format_item if name == "juya-ai-daily" else None
     try:
-        merged = merge(source, FEEDS_DIR / f"{name}.xml")
+        merged = merge(source, FEEDS_DIR / f"{name}.xml", item_transform=transform)
     except Exception as e:
         log.error(f"{name}: merge failed: {e}")
         return False
