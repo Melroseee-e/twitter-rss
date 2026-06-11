@@ -66,7 +66,9 @@ def parse_config(path: Path) -> list[tuple[str, str]]:
 def fetch(url: str, client: httpx.Client) -> bytes | None:
     try:
         r = client.get(url, headers=HEADERS, timeout=60)
-        if r.status_code == 200 and len(r.content) > 100 and b"<rss" in r.content[:2000]:
+        head = r.content[:2000]
+        # 接受 RSS 2.0(<rss>)与 Atom(<feed>,如 YouTube 原生 feed)。
+        if r.status_code == 200 and len(r.content) > 100 and (b"<rss" in head or b"<feed" in head):
             return r.content
         log.warning(f"fetch {url}: HTTP {r.status_code} size={len(r.content)}")
     except Exception as e:
@@ -190,6 +192,58 @@ def juya_format_item(it: ET.Element) -> None:
         ET.SubElement(it, "description").text = summary
 
 
+# --- YouTube 原生 Atom feed → RSS 2.0 ----------------------------------------
+# RSSHub 的 youtube 路由在数据中心 IP 上整体 502(它退回抓 youtube.com 原生 feed,
+# 而 YouTube 对数据中心 IP 回 404)。但 GitHub Actions 的 Azure IP 没被封,能直接
+# 200 拿到原生 feed——所以这里跳过 RSSHub,直抓原生 Atom feed 自己转成 RSS。
+# guid 用视频 watch URL,与历史里 RSSHub 时期写入的条目 guid 一致,合并去重无缝。
+_ATOM_NS = "{http://www.w3.org/2005/Atom}"
+_MRSS_NS = "{http://search.yahoo.com/mrss/}"
+_YT_NS = "{http://www.youtube.com/xml/schemas/2015}"
+
+
+def youtube_atom_to_rss(atom_bytes: bytes) -> bytes:
+    """YouTube 原生 Atom feed → accumulate 能吃的 RSS 2.0 bytes。
+    每条 <entry> → <item>;description = 缩略图<img> + media:description 原文。"""
+    feed = ET.fromstring(atom_bytes)
+    ftitle = feed.findtext(f"{_ATOM_NS}title") or "YouTube"
+    rss = ET.Element("rss", {"version": "2.0"})
+    ch = ET.SubElement(rss, "channel")
+    ET.SubElement(ch, "title").text = ftitle
+    ET.SubElement(ch, "link").text = "https://www.youtube.com/"
+    ET.SubElement(ch, "description").text = ftitle
+    for entry in feed.findall(f"{_ATOM_NS}entry"):
+        href = ""
+        for ln in entry.findall(f"{_ATOM_NS}link"):
+            if ln.get("rel") == "alternate" and ln.get("href"):
+                href = ln.get("href")
+                break
+        if not href:
+            vid = entry.findtext(f"{_YT_NS}videoId") or ""
+            href = f"https://www.youtube.com/watch?v={vid}" if vid else ""
+        it = ET.SubElement(ch, "item")
+        ET.SubElement(it, "title").text = entry.findtext(f"{_ATOM_NS}title") or ""
+        ET.SubElement(it, "link").text = href
+        g = ET.SubElement(it, "guid")
+        g.text = href
+        g.set("isPermaLink", "true")
+        pub = entry.findtext(f"{_ATOM_NS}published") or ""
+        try:
+            ET.SubElement(it, "pubDate").text = format_datetime(datetime.fromisoformat(pub))
+        except Exception:
+            pass
+        grp = entry.find(f"{_MRSS_NS}group")
+        desc = (grp.findtext(f"{_MRSS_NS}description") if grp is not None else "") or ""
+        thumb = ""
+        if grp is not None:
+            th = grp.find(f"{_MRSS_NS}thumbnail")
+            if th is not None:
+                thumb = th.get("url") or ""
+        body = (f'<img src="{thumb}"/>\n' if thumb else "") + desc
+        ET.SubElement(it, "description").text = body
+    return b'<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(rss, encoding="utf-8")
+
+
 def merge(source_bytes: bytes, existing_path: Path, limit: int = MAX_ITEMS,
           item_transform=None) -> bytes:
     """Parse source RSS 2.0; merge its items with existing file (if any)."""
@@ -246,6 +300,13 @@ def process_one(name: str, url: str, client: httpx.Client) -> bool:
     source = fetch(url, client)
     if source is None:
         return False
+    # YouTube 原生 feed 是 Atom,先转成 RSS 2.0 再走统一的 merge 管线。
+    if "youtube.com/feeds/videos.xml" in url:
+        try:
+            source = youtube_atom_to_rss(source)
+        except Exception as e:
+            log.error(f"{name}: youtube atom→rss failed: {e}")
+            return False
     transform = juya_format_item if name == "juya-ai-daily" else None
     try:
         merged = merge(source, FEEDS_DIR / f"{name}.xml", item_transform=transform)
