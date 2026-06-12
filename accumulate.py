@@ -122,13 +122,8 @@ _TS_RE = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")   # YouTube 章节时间戳 0
 _URL_RE = re.compile(r"^https?://")
 
 
-def _domain(u: str) -> str:
-    m = re.match(r"https?://([^/]+)", u)
-    return (m.group(1) if m else u).replace("www.", "")
-
-
-def format_juya_description(text: str) -> tuple[str | None, list[str]]:
-    """YouTube 章节式简介 → (HTML, [各条标题])。不像章节列表则返回 (None, [])."""
+def _parse_juya_chapters(text: str) -> tuple[str | None, list[tuple[str, list[str]]]]:
+    """YouTube 章节式简介 → (cover, [(标题,[来源url])])。不像章节列表则 (None, [])."""
     raw = text or ""
     m_img = re.search(r'<img[^>]+src="([^"]+)"', raw)   # 抽 youtube 缩略图当封面
     cover = m_img.group(1) if m_img else None
@@ -161,35 +156,79 @@ def format_juya_description(text: str) -> tuple[str | None, list[str]]:
         else:
             title.append(tok)
     flush()
+    return cover, items
 
+
+def _parse_prev_formatted(ce_text: str) -> tuple[str | None, list[tuple[str, list[str]]]]:
+    """从本脚本旧版排版的 content:encoded 里反解出 (cover,[(标题,[url])]),便于换版重排。"""
+    cover = None
+    m = re.search(r'<img[^>]+src="([^"]+)"', ce_text or "")
+    if m:
+        cover = m.group(1)
+    items: list[tuple[str, list[str]]] = []
+    # 旧版: <h3>标题</h3><ul>..<a href=url>..</ul>  /  新版: <li>标题 <a href=url>↗</a> #N</li>
+    for hm in re.finditer(r"<h3>(.*?)</h3>\s*<ul>(.*?)</ul>", ce_text or "", re.S):
+        t = html.unescape(re.sub(r"<[^>]+>", "", hm.group(1))).strip()
+        us = re.findall(r'href="([^"]+)"', hm.group(2))
+        if t and us:
+            items.append((t, us))
     if not items:
-        return None, []
+        for li in re.finditer(r"<li>(.*?)</li>", ce_text or "", re.S):
+            chunk = li.group(1)
+            us = re.findall(r'href="([^"]+)"', chunk)
+            t = html.unescape(re.sub(r"<[^>]+>", "", re.sub(r'<a\b.*?</a>', "", chunk))).strip()
+            t = re.sub(r"#\d+\s*$", "", t).strip()
+            if t and us:
+                items.append((t, us))
+    return cover, items
+
+
+def _render_juya(cover: str | None, items: list[tuple[str, list[str]]],
+                 date: str | None, video_url: str | None) -> str:
+    """排成跟橘鸦老 GitHub 早报一致的版式: 封面 + H1 日期 + 视频版 + 概览 + 带 ↗ 的条目列表。"""
     parts: list[str] = []
     if cover:
         parts.append(f'<p><img src="{html.escape(cover)}"/></p>')
-    for t, us in items:
-        lis = "".join(
-            f'<li><a href="{html.escape(u)}">{html.escape(_domain(u))}</a></li>'
-            for u in us
-        )
-        parts.append(f"<h3>{html.escape(t)}</h3>\n<ul>{lis}</ul>")
-    return "\n".join(parts), [t for t, _ in items]
+    if date:
+        parts.append(f"<h1>AI 早报 {html.escape(date)}</h1>")
+    if video_url:
+        parts.append(f'<p><strong>视频版</strong>：'
+                     f'<a href="{html.escape(video_url)}">YouTube</a></p>')
+    parts.append("<h2>概览</h2>")
+    lis = []
+    for i, (t, us) in enumerate(items, 1):
+        arrows = " ".join(f'<a href="{html.escape(u)}">↗</a>' for u in us)
+        lis.append(f"<li>{html.escape(t)} {arrows} <code>#{i}</code></li>")
+    parts.append("<ul>\n" + "\n".join(lis) + "\n</ul>")
+    return "\n".join(parts)
 
 
 def juya_format_item(it: ET.Element) -> None:
-    """给一条橘鸦 YouTube item 幂等地补上干净 <content:encoded> + 清爽 description."""
-    if it.find(_CONTENT_ENC) is not None:
-        return  # 已格式化(或本就是橘鸦旧 GitHub 富文本条目)→ 不动
-    body, titles = format_juya_description(it.findtext("description") or "")
-    if not body:
-        return  # 不是章节式简介 → 原样保留
-    ET.SubElement(it, _CONTENT_ENC).text = body
+    """把一条橘鸦 YouTube item 重排成「老 GitHub 早报」版式的 <content:encoded>。
+    只认 youtube 来源条目(guid=watch URL),绝不碰橘鸦旧 GitHub 富文本条目。换版式可重跑。"""
+    guid = it.findtext("guid") or ""
+    if "youtube.com/watch" not in guid:
+        return  # 非 youtube 来源 → 不动
+    title_txt = it.findtext("title") or ""
+    m = re.search(r"(\d{4}-\d{2}-\d{2})", title_txt)   # 从标题【AI 早报 2026-06-12】抽日期
+    date = m.group(1) if m else None
+    cover, items = _parse_juya_chapters(it.findtext("description") or "")
+    if not items:                                      # description 已是摘要 → 从旧 content 反解重排
+        ce = it.find(_CONTENT_ENC)
+        if ce is not None and ce.text:
+            cover, items = _parse_prev_formatted(ce.text)
+    if not items:
+        return
+    body = _render_juya(cover, items, date, guid)
+    ce = it.find(_CONTENT_ENC)
+    if ce is None:
+        ce = ET.SubElement(it, _CONTENT_ENC)
+    ce.text = body
+    summary = "｜".join(t for t, _ in items)
     desc = it.find("description")
-    summary = "｜".join(titles)
-    if desc is not None:
-        desc.text = summary
-    else:
-        ET.SubElement(it, "description").text = summary
+    if desc is None:
+        desc = ET.SubElement(it, "description")
+    desc.text = summary
 
 
 # --- YouTube 原生 Atom feed → RSS 2.0 ----------------------------------------
