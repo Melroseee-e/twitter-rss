@@ -284,8 +284,9 @@ def youtube_atom_to_rss(atom_bytes: bytes) -> bytes:
 
 
 def merge(source_bytes: bytes, existing_path: Path, limit: int = MAX_ITEMS,
-          item_transform=None) -> bytes:
-    """Parse source RSS 2.0; merge its items with existing file (if any)."""
+          item_transform=None, drop_pred=None) -> bytes:
+    """Parse source RSS 2.0; merge its items with existing file (if any).
+    drop_pred(item)->bool: 命中的合并后条目会被剔除(用于清掉历史遗留来源)。"""
     source_root = ET.fromstring(source_bytes)
     channel = source_root.find("channel")
     if channel is None:
@@ -306,6 +307,9 @@ def merge(source_bytes: bytes, existing_path: Path, limit: int = MAX_ITEMS,
                         seen_guids.add(g)
         except Exception as e:
             log.warning(f"existing {existing_path.name} unreadable: {e}")
+
+    if drop_pred:
+        new_items = [it for it in new_items if not drop_pred(it)]
 
     new_items.sort(key=item_date, reverse=True)
     new_items = new_items[:limit]
@@ -347,8 +351,13 @@ def process_one(name: str, url: str, client: httpx.Client) -> bool:
             log.error(f"{name}: youtube atom→rss failed: {e}")
             return False
     transform = juya_format_item if name == "juya-ai-daily" else None
+    # juya 已换回橘鸦官方富文本 RSS;清掉历史里早期镜像 YouTube 时留下的条目
+    # (guid=watch URL),免得跟官方版同一天的早报重复。
+    drop_pred = (lambda it: "youtube.com/watch" in (item_guid(it) or "")) \
+        if name == "juya-ai-daily" else None
     try:
-        merged = merge(source, FEEDS_DIR / f"{name}.xml", item_transform=transform)
+        merged = merge(source, FEEDS_DIR / f"{name}.xml",
+                       item_transform=transform, drop_pred=drop_pred)
     except Exception as e:
         log.error(f"{name}: merge failed: {e}")
         return False

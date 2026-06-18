@@ -14,10 +14,11 @@ yt-ycombinator        http://66.154.109.148:1200/youtube/channel/UCcefcZRL2oaA_u
 
 # AI — full history preserved
 openai-news           https://openai.com/news/rss.xml
-# juya-ai-daily: 橘鸦 2026-06 删了 imjuya GitHub 源(整个账号 404)。改抓他 YouTube @imjuya 的早报。
-# 直抓 YouTube 原生 feed(Atom),accumulate.py 转 RSS + 排版。绕开 RSSHub(其 youtube 路由在
-# 数据中心 IP 上 502)。原生 feed 对数据中心 IP 会 404,但 GitHub Actions 的 Azure IP 不被封,可直取。
-juya-ai-daily         https://www.youtube.com/feeds/videos.xml?channel_id=UCIDll3SRcbHwwcXbrwvBZNw
+# juya-ai-daily: 橘鸦 2026-06 用新号 jujuyaya 重建了图文早报(老 imjuya 仍全 404)。
+# 直接镜像他官方 RSS(富文本含逐条正文摘要,版式即老 GitHub 早报)。GitHub Pages 静态 feed,
+# 任何 IP 都能抓,比之前抓 YouTube 简介(只有标题+链接)强,且不受数据中心 IP 反爬影响。
+# process_one 对本 feed 设了 drop_pred 清掉历史遗留的 YouTube 镜像条目,免同日重复。
+juya-ai-daily         https://daily.juya.uk/rss.xml
 anthropic-engineering http://66.154.109.148:1200/anthropic/engineering?key=${RSSHUB_KEY}
 anthropic-research    http://66.154.109.148:1200/anthropic/research?key=${RSSHUB_KEY}
 
