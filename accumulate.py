@@ -203,12 +203,27 @@ def _render_juya(cover: str | None, items: list[tuple[str, list[str]]],
     return "\n".join(parts)
 
 
+def _strip_inline_styles(it: ET.Element) -> bool:
+    """剥掉 content:encoded 里所有内联 style 属性,返回是否改过。
+    橘鸦 2026-06-19 起改版,把正文套进 <div style="...color:#18181b;max-width:760px">,
+    硬编码近黑字色 → 深色模式阅读器黑字黑底看不见。剥掉 style 让阅读器主题接管,
+    回到 6/18 及更早那种干净结构(结构/链接不动,仅去样式)。幂等。"""
+    ce = it.find(_CONTENT_ENC)
+    if ce is None or not ce.text or 'style="' not in ce.text:
+        return False
+    ce.text = re.sub(r'\s*style="[^"]*"', "", ce.text)
+    return True
+
+
 def juya_format_item(it: ET.Element) -> None:
-    """把一条橘鸦 YouTube item 重排成「老 GitHub 早报」版式的 <content:encoded>。
-    只认 youtube 来源条目(guid=watch URL),绝不碰橘鸦旧 GitHub 富文本条目。换版式可重跑。"""
+    """规整一条橘鸦 item 的 <content:encoded>。两条来源分别处理,幂等可重跑:
+    - daily.juya.uk 新富文本(2026-06-19 改版,带死样式 div)→ 剥内联 style。
+    - 早期镜像 YouTube(guid=watch URL)→ 重排成老 GitHub 早报版式。
+    - 橘鸦旧 GitHub 富文本(imjuya, 无 style)→ 不动。"""
     guid = it.findtext("guid") or ""
     if "youtube.com/watch" not in guid:
-        return  # 非 youtube 来源 → 不动
+        _strip_inline_styles(it)  # daily.juya.uk 新版去样式;旧 GitHub 无 style 时 no-op
+        return  # 非 youtube 来源 → 仅去样式,不重排
     title_txt = it.findtext("title") or ""
     m = re.search(r"(\d{4}-\d{2}-\d{2})", title_txt)   # 从标题【AI 早报 2026-06-12】抽日期
     date = m.group(1) if m else None
