@@ -19,11 +19,18 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: false
+  # 必须 true。2026-08-11 事故:08-06 一个 schedule run 卡在 status=waiting
+  # (等 github-pages 环境部署) 长达 5 天,死死占住本 group。它既不算 in_progress
+  # 也不算 queued,后续每个 run 只能 pending 排队再被顶掉 → 整条早报线静默瘫痪,
+  # 不报错、不告警、feed 直接 404。设为 true 后,新 run 会自动挤掉卡死的旧 run,
+  # 这个死锁不可能再发生。
+  cancel-in-progress: true
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    # 兜底:任何一步挂住最多 20 分钟就失败退出,不会无限占住 concurrency group
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
