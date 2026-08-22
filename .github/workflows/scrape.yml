@@ -134,5 +134,17 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      # Pages 把 pages_build_version(=GITHUB_SHA) 当部署身份。本仓库 feeds
+      # 不进 git,HEAD 可以连续很多天不变,于是每次 deploy 都报 success,
+      # 线上 XML 其实不更新。2026-08-17 整站 last-modified 冻住,橘鸦停在 8/16。
+      # 用 run_id 派生一个 40 位 hex,保证每次部署都是新版本。
+      - name: Unique Pages build version
+        run: |
+          python3 - <<'PY' >> "$GITHUB_ENV"
+          import hashlib, os
+          print("GITHUB_SHA=" + hashlib.sha1(os.environ["RID"].encode()).hexdigest())
+          PY
+        env:
+          RID: ${{ github.run_id }}-${{ github.run_attempt }}-${{ github.run_number }}
       - id: deployment
         uses: actions/deploy-pages@v4
